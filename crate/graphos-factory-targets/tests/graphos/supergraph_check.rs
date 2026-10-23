@@ -446,6 +446,21 @@ fn a_base_url_with_a_credential_query_parameter_is_not_sent() {
         row
     );
     assert!(!stub.path().join("args").exists());
+    // The short spellings are credentials too.
+    for query in [
+        "pwd=abc",
+        "pw=abc",
+        "user_pw=abc",
+        "pw1=abc",
+        "cred=abc",
+        "jwt=abc",
+        "bearer=abc",
+    ] {
+        let url = format!("https://git.example.com/api/v1?{query}");
+        let (row, _, stub, _) = check_with(&fixture("pass.json"), 0, &[("GITEA_BASE_URL", &url)]);
+        assert_eq!(row["status"], "not_run", "{query}: {}", row);
+        assert!(!stub.path().join("args").exists(), "{query} was sent");
+    }
     // A query parameter that names no credential is sent.
     let (row, _, _, _) = check_with(
         &fixture("pass.json"),

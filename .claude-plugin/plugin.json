@@ -1,7 +1,7 @@
 {
   "name": "graphos-factory",
   "displayName": "GraphOS Factory",
-  "version": "0.12.2",
+  "version": "0.12.3",
   "description": "Build and iterate on an Apollo Connectors subgraph for a GraphOS supergraph from a REST API, with or without an OpenAPI spec, in a dedicated git workspace that records the source inventory, the operation/field selection, and every design decision.",
   "author": {
     "name": "Apollo Graph, Inc."
