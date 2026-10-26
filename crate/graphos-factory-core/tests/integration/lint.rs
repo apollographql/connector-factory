@@ -8997,6 +8997,127 @@ fn a_resolved_behaviour_waiver_clears_a_deliberately_required_argument() {
     }
 }
 
+// ─── the mirror: an optional argument over a required source ────────────────
+
+/// A source the vendor requires, exposed as an optional argument: a caller
+/// who leaves it out gets a call without it, and the vendor rejects it.
+/// A recruiting API's five required body members exposed nullable were this.
+#[test]
+fn an_optional_argument_over_a_required_source_parameter_is_a_warning() {
+    let r = required_lint("paymentCardId: Int", venmo_param(true));
+    let hits = findings_of(&r, "argument-optional-required-in-source");
+    assert_eq!(hits.len(), 1, "{:?}", r.findings);
+    assert_eq!(hits[0].severity, "warn");
+    assert!(
+        hits[0].message.contains("argument `paymentCardId`")
+            && hits[0]
+                .message
+                .contains("query parameter `payment_card_id` is required")
+            && hits[0]
+                .message
+                .contains("--omit 'get:/widgets|behaviour|query:payment_card_id|editorial'"),
+        "{}",
+        hits[0].message
+    );
+}
+
+/// Quiet when the value is filled anyway (a GraphQL default, a connector
+/// fallback), when the argument is required, when the source leaves it
+/// optional, and when the inventory does not say.
+#[test]
+fn an_optional_argument_that_is_filled_or_agrees_is_quiet() {
+    let inv = doc_inventory(Some("List widgets"), None, json!([venmo_param(true)]));
+    for (args, http) in [
+        ("paymentCardId: Int = 3", VENMO_HTTP),
+        (
+            "paymentCardId: Int",
+            r#"GET: "/widgets", queryParams: "payment_card_id: $args.paymentCardId ?? 3""#,
+        ),
+        ("paymentCardId: Int!", VENMO_HTTP),
+    ] {
+        let r = doc_lint(
+            &doc_sdl("  \"List widgets.\"\n", args, http),
+            &inv,
+            &doc_selection(None),
+        );
+        assert!(
+            findings_of(&r, "argument-optional-required-in-source").is_empty(),
+            "{} / {}: {:?}",
+            args,
+            http,
+            r.findings
+        );
+    }
+    for param in [
+        venmo_param(false),
+        json!({"name": "payment_card_id", "in": "query", "type": "integer"}),
+    ] {
+        let r = required_lint("paymentCardId: Int", param.clone());
+        assert!(
+            findings_of(&r, "argument-optional-required-in-source").is_empty(),
+            "{}: {:?}",
+            param,
+            r.findings
+        );
+    }
+}
+
+/// A body key's `required` is its enclosing object's list: a top-level key
+/// is judged, a key nested in an object that is itself optional is not.
+#[test]
+fn a_required_body_key_is_judged_at_the_top_level_only() {
+    let mut inv = doc_inventory(Some("Pay"), None, json!([]));
+    inv["operations"][0]["request_body"] = json!({"content_type": "application/json", "required": true, "shape_ref": "#/shapes/Payment"});
+    inv["shapes"] = json!({
+        "Payment": {"type": "object", "required": ["amount"], "properties": {
+            "amount": {"type": "number"},
+            "card": {"$ref": "#/shapes/Card"}
+        }},
+        "Card": {"type": "object", "required": ["id"], "properties": {"id": {"type": "integer"}}}
+    });
+    let r = doc_lint(
+        &doc_sdl(
+            "  \"Pay.\"\n",
+            "amount: Float, cardId: Int",
+            r#"POST: "/widgets", body: """
+              amount: $args.amount
+              card: { id: $args.cardId }
+              """"#,
+        ),
+        &inv,
+        &doc_selection(None),
+    );
+    let hits = findings_of(&r, "argument-optional-required-in-source");
+    assert_eq!(hits.len(), 1, "{:?}", r.findings);
+    assert!(
+        hits[0].message.contains("argument `amount`")
+            && hits[0].message.contains("body key `amount`"),
+        "{}",
+        hits[0].message
+    );
+}
+
+/// The resolved `behaviour` waiver that clears a deliberate `!` clears a
+/// deliberately optional argument too.
+#[test]
+fn a_resolved_behaviour_waiver_clears_a_deliberately_optional_argument() {
+    for (status, expected) in [("resolved", 0), ("open", 1)] {
+        let r = lint_with_waiver(
+            status,
+            "query:payment_card_id",
+            "paymentCardId: Int",
+            venmo_param(true),
+        );
+        assert_eq!(
+            findings_of(&r, "argument-optional-required-in-source").len(),
+            expected,
+            "{}: {:?}",
+            status,
+            r.findings
+        );
+    }
+}
+
 // ─── ADR 0113: findings count where resolved decisions count ────────────────
 
 /// A findings.json holding one finding: `status` current or superseded.
@@ -9337,4 +9458,470 @@ fn a_stray_file_in_the_decision_log_is_an_error_naming_it() {
         files,
         [Some(".factory/findings/F-abc123-y.json.rej".to_string())]
     );
+}
+
+// ─── success-path-unresolved ────────────────────────────────────────────────
+
+/// Two operations on one source; `@SOURCE_SUCCESS@` and `@CONNECT_SUCCESS@`
+/// are whole lines: an `isSuccess: "…"` argument, or empty.
+const SUCCESS_SDL: &str = r#"extend schema
+  @link(url: "https://specs.apollo.dev/federation/v2.12", import: ["@key", "@tag"])
+  @link(url: "https://specs.apollo.dev/connect/v0.3", import: ["@source", "@connect"])
+
+@source(
+  name: "widget_co"
+  http: {
+    baseURL: "{{BASE_URL}}"
+    headers: [{ name: "Authorization", value: "Bearer {{AUTH_EXPR}}" }]
+  }
+@SOURCE_SUCCESS@
+)
+
+type Widget_Co_Widget {
+  id: ID
+  name: String
+}
+
+type Query {
+  widget_co_listWidgets: [Widget_Co_Widget]
+    @connect(source: "widget_co", http: { GET: "/widgets" }, selection: "$.widgets { id name }")
+  widget_co_getWidget(id: ID!): Widget_Co_Widget
+    @connect(
+      source: "widget_co"
+      http: { GET: "/widgets/{$args.id}" }
+      selection: "id name"
+@CONNECT_SUCCESS@
+    )
+}
+"#;
+
+/// The list body carries `ok`; the by-id body is the widget alone, unless
+/// `get_shape` replaces it.
+fn success_inventory(get_shape: Value) -> Value {
+    let mut inv = errpath_inventory(json!([]), json!([]), json!({}));
+    inv["operations"][0]["response"] = json!({"status": "200", "content_type": "application/json", "shape_ref": "#/shapes/WidgetList"});
+    inv["operations"][1]["response"] = json!({"status": "200", "content_type": "application/json", "shape_ref": "#/shapes/Widget"});
+    inv["shapes"] = json!({
+        "WidgetList": {"type": "object", "properties": {"ok": {"type": "boolean"}, "widgets": {"type": "array", "items": {"$ref": "#/shapes/Widget"}}}},
+        "Widget": get_shape
+    });
+    inv
+}
+
+fn widget_shape() -> Value {
+    json!({"type": "object", "properties": {"id": {"type": "string"}, "name": {"type": "string"}}})
+}
+
+fn success_findings(
+    source: &str,
+    connect: &str,
+    inv: &Value,
+) -> Vec<graphos_factory_core::lint::Finding> {
+    let sdl = SUCCESS_SDL
+        .replace("@SOURCE_SUCCESS@", source)
+        .replace("@CONNECT_SUCCESS@", connect);
+    lint(vec![
+        ("widget-co.graphql", s(&sdl)),
+        (".factory/selection.yaml", s(ERRPATH_SELECTION)),
+        (
+            ".factory/inventory.json",
+            s(&graphos_factory_core::json::pretty(inv)),
+        ),
+    ])
+    .findings
+    .into_iter()
+    .filter(|f| f.rule == "success-path-unresolved")
+    .collect()
+}
+
+/// A source-wide `isSuccess` reading a key one operation's success body
+/// lacks: that operation's every success would become a connector error.
+#[test]
+fn a_source_is_success_path_one_body_lacks_is_a_warning_naming_it() {
+    let hits = success_findings(
+        "  isSuccess: \"$.ok\"",
+        "",
+        &success_inventory(widget_shape()),
+    );
+    assert_eq!(hits.len(), 1, "{:?}", hits);
+    assert_eq!(hits[0].severity, "warn");
+    assert!(
+        hits[0]
+            .message
+            .contains("`$.ok` in the @source(name: \"widget_co\") isSuccess")
+            && hits[0]
+                .message
+                .contains("1 of the 2 operations it decides (get:/widgets/{id})"),
+        "{}",
+        hits[0].message
+    );
+    let sdl = SUCCESS_SDL.replace("@SOURCE_SUCCESS@", "  isSuccess: \"$.ok\"");
+    assert_eq!(hits[0].line, Some(line_containing(&sdl, "isSuccess")));
+}
+
+/// The quiet cases: a `??` fallback, a body that cannot say what it
+/// carries, every body carrying the key, and an operation that decides for
+/// itself (its own isSuccess takes it out of the source's set).
+#[test]
+fn a_guarded_or_unknowable_or_overridden_success_path_is_quiet() {
+    let open = json!({"type": "object", "additionalProperties": true});
+    let with_ok = json!({"type": "object", "properties": {"ok": {"type": "boolean"}, "id": {"type": "string"}}});
+    for (source, connect, shape) in [
+        ("  isSuccess: \"$.ok ?? true\"", "", widget_shape()),
+        ("  isSuccess: \"$.ok\"", "", open),
+        ("  isSuccess: \"$.ok\"", "", with_ok.clone()),
+        (
+            "  isSuccess: \"$.ok\"",
+            "      isSuccess: \"$.id\"",
+            widget_shape(),
+        ),
+    ] {
+        let hits = success_findings(source, connect, &success_inventory(shape.clone()));
+        assert!(
+            hits.is_empty(),
+            "{} / {} / {}: {:?}",
+            source,
+            connect,
+            shape,
+            hits
+        );
+    }
+}
+
+/// A `@connect`'s own isSuccess is judged against that operation's body.
+#[test]
+fn a_connect_is_success_path_its_body_lacks_is_a_warning() {
+    let hits = success_findings(
+        "",
+        "      isSuccess: \"$.success\"",
+        &success_inventory(widget_shape()),
+    );
+    assert_eq!(hits.len(), 1, "{:?}", hits);
+    assert!(
+        hits[0].message.starts_with(
+            "get:/widgets/{id}: `$.success` in the `Query.widget_co_getWidget` @connect isSuccess"
+        ) && hits[0].message.contains("it carries: id, name"),
+        "{}",
+        hits[0].message
+    );
+}
+
+// ─── wire-key-undocumented ──────────────────────────────────────────────────
+
+fn wire_key_findings(http: &str, params: Value) -> Vec<graphos_factory_core::lint::Finding> {
+    let inv = doc_inventory(Some("List widgets"), None, params);
+    doc_lint(
+        &doc_sdl("  \"List widgets.\"\n", "id: ID, after: String", http),
+        &inv,
+        &doc_selection(None),
+    )
+    .findings
+    .into_iter()
+    .filter(|f| f.rule == "wire-key-undocumented")
+    .collect()
+}
+
+fn query_param(name: &str) -> Value {
+    json!({"name": name, "in": "query", "required": false, "type": "string"})
+}
+
+/// incidentio's schedule entries: the connector sent `after` where the spec
+/// has `entry_window_start`, and the scaffolded stub demanded `after` too.
+#[test]
+fn a_query_key_the_source_does_not_document_is_a_warning() {
+    let params = json!([
+        query_param("schedule_id"),
+        query_param("entry_window_start")
+    ]);
+    for http in [
+        r#"GET: "/widgets", queryParams: "schedule_id: $args.id after: $args.after""#,
+        r#"GET: "/widgets?schedule_id={$args.id}&after={$args.after}""#,
+    ] {
+        let hits = wire_key_findings(http, params.clone());
+        assert_eq!(hits.len(), 1, "{}: {:?}", http, hits);
+        assert_eq!(hits[0].severity, "warn");
+        assert!(
+            hits[0].message.contains("sends query key `after`")
+                && hits[0]
+                    .message
+                    .contains("(documented: entry_window_start, schedule_id)"),
+            "{}",
+            hits[0].message
+        );
+    }
+}
+
+/// Documented keys, a `[]` list suffix the source leaves off, a key the
+/// source documents with its suffix (pagerduty's `statuses[]`), and a key
+/// built from an expression are quiet.
+#[test]
+fn documented_list_suffixed_and_dynamic_query_keys_are_quiet() {
+    let params = json!([
+        query_param("schedule_id"),
+        query_param("after"),
+        query_param("statuses[]")
+    ]);
+    for http in [
+        r#"GET: "/widgets", queryParams: "schedule_id: $args.id after: $args.after""#,
+        r#"GET: "/widgets", queryParams: "\"after[]\": $args.after""#,
+        r#"GET: "/widgets", queryParams: "\"statuses[]\": $args.after""#,
+        r#"GET: "/widgets?schedule_id={$args.id}&{$args.after}""#,
+    ] {
+        let hits = wire_key_findings(http, params.clone());
+        assert!(hits.is_empty(), "{}: {:?}", http, hits);
+    }
+}
+
+/// A single-quoted key, a member of a documented object parameter (dotted
+/// or deepObject), and a pair the operation's own path carries are the
+/// source's keys too.
+#[test]
+fn quoted_object_member_and_path_carried_query_keys_are_quiet() {
+    let params = json!([query_param("filter_by"), query_param("ids[]")]);
+    for http in [
+        r#"GET: "/widgets", queryParams: "'ids[]': $args.after""#,
+        r#"GET: "/widgets", queryParams: "\"filter_by.state\": $args.after""#,
+        r#"GET: "/widgets", queryParams: "\"filter_by[state]\": $args.after""#,
+    ] {
+        let hits = wire_key_findings(http, params.clone());
+        assert!(hits.is_empty(), "{}: {:?}", http, hits);
+    }
+    let mut inv = doc_inventory(Some("List widgets"), None, json!([]));
+    inv["operations"][0]["path"] = json!("/?operation=user");
+    let hits: Vec<_> = doc_lint(
+        &doc_sdl(
+            "  \"List widgets.\"\n",
+            "id: ID",
+            r#"GET: "/?operation=user""#,
+        ),
+        &inv,
+        &doc_selection(None),
+    )
+    .findings
+    .into_iter()
+    .filter(|f| f.rule == "wire-key-undocumented")
+    .collect();
+    assert!(hits.is_empty(), "{:?}", hits);
+}
+
+/// The source requires the suffix and the connector drops it: on the wire
+/// `statuses` is not `statuses[]`.
+#[test]
+fn a_list_suffix_the_connector_drops_is_reported() {
+    let params = json!([query_param("statuses[]")]);
+    let hits = wire_key_findings(
+        r#"GET: "/widgets", queryParams: "statuses: $args.after""#,
+        params,
+    );
+    assert_eq!(hits.len(), 1, "{:?}", hits);
+    assert!(
+        hits[0].message.contains("sends query key `statuses`"),
+        "{}",
+        hits[0].message
+    );
+}
+
+// ─── auth-scheme-drift ──────────────────────────────────────────────────────
+
+fn scheme(kind: &str, header: Option<&str>, prefix: Option<&str>) -> Value {
+    json!({"kind": kind, "header": header, "prefix": prefix, "scheme_name": kind, "source": "spec"})
+}
+
+/// The core fixture sends `Authorization: Bearer {{AUTH_EXPR}}` unless
+/// `header_line` replaces that header entry.
+fn auth_findings(
+    schemes: Value,
+    header_line: Option<&str>,
+) -> Vec<graphos_factory_core::lint::Finding> {
+    let mut inv = inventory();
+    inv["api"]["auth"] = schemes;
+    let sdl = match header_line {
+        Some(h) => SDL.replace(
+            r#"{ name: "Authorization", value: "Bearer {{AUTH_EXPR}}" }"#,
+            h,
+        ),
+        None => SDL.to_string(),
+    };
+    lint(vec![
+        ("widget-co.graphql", s(&sdl)),
+        (
+            ".factory/inventory.json",
+            s(&graphos_factory_core::json::pretty(&inv)),
+        ),
+    ])
+    .findings
+    .into_iter()
+    .filter(|f| f.rule == "auth-scheme-drift")
+    .collect()
+}
+
+/// A prefix none of the documented schemes for that header gives, and a
+/// credential in a header no scheme documents, are warnings.
+#[test]
+fn a_credential_header_the_documented_schemes_contradict_is_a_warning() {
+    let hits = auth_findings(
+        json!([scheme("basic", Some("Authorization"), Some("Basic "))]),
+        None,
+    );
+    assert_eq!(hits.len(), 1, "{:?}", hits);
+    assert_eq!(hits[0].severity, "warn");
+    assert!(
+        hits[0].message.contains("sent as `Bearer {{AUTH_EXPR}}`")
+            && hits[0].message.contains("(`Basic `)"),
+        "{}",
+        hits[0].message
+    );
+    let hits = auth_findings(
+        json!([scheme("bearer", Some("Authorization"), Some("Bearer "))]),
+        Some(r#"{ name: "X-Api-Key", value: "{{AUTH_EXPR}}" }"#),
+    );
+    assert_eq!(hits.len(), 1, "{:?}", hits);
+    assert!(
+        hits[0].message.contains("in the `x-api-key` header")
+            && hits[0]
+                .message
+                .contains("documented credential headers: authorization"),
+        "{}",
+        hits[0].message
+    );
+}
+
+/// Quiet: a matching prefix, any one of several documented schemes
+/// matching, a scheme that records no prefix, and a source that documents
+/// no header-borne credential.
+#[test]
+fn a_credential_header_some_documented_scheme_allows_is_quiet() {
+    for (schemes, header) in [
+        (
+            json!([scheme("bearer", Some("Authorization"), Some("Bearer "))]),
+            None,
+        ),
+        (
+            json!([
+                scheme("basic", Some("Authorization"), Some("Basic ")),
+                scheme("oauth2", Some("Authorization"), Some("Bearer "))
+            ]),
+            Some(r#"{ name: "Authorization", value: "Basic {{AUTH_EXPR}}" }"#),
+        ),
+        (
+            json!([scheme("api_key", Some("Authorization"), None)]),
+            Some(r#"{ name: "Authorization", value: "Token token={{AUTH_EXPR}}" }"#),
+        ),
+        (json!([scheme("api_key", None, None)]), None),
+        (json!([]), None),
+    ] {
+        let hits = auth_findings(schemes.clone(), header);
+        assert!(hits.is_empty(), "{} / {:?}: {:?}", schemes, header, hits);
+    }
+}
+
+// ─── connector-path-undocumented ────────────────────────────────────────────
+
+fn connector_path_findings(
+    get_shape: Value,
+    workspace: &str,
+) -> Vec<graphos_factory_core::lint::Finding> {
+    let sdl = SUCCESS_SDL
+        .replace("@SOURCE_SUCCESS@", "")
+        .replace("@CONNECT_SUCCESS@", "");
+    lint(vec![
+        ("widget-co.graphql", s(&sdl)),
+        (".factory/workspace.yaml", s(workspace)),
+        (".factory/selection.yaml", s(ERRPATH_SELECTION)),
+        (
+            ".factory/inventory.json",
+            s(&graphos_factory_core::json::pretty(&success_inventory(
+                get_shape,
+            ))),
+        ),
+    ])
+    .findings
+    .into_iter()
+    .filter(|f| f.rule == "connector-path-undocumented")
+    .collect()
+}
+
+/// Both connectors select `name`, which the shared `Widget` body does not
+/// carry: a scaffolded stub would carry it anyway, and the vendor would
+/// not. One warning per operation, with the path as each one spells it.
+#[test]
+fn a_selected_path_the_documented_body_lacks_is_a_warning() {
+    let hits = connector_path_findings(
+        json!({"type": "object", "properties": {"id": {"type": "string"}}}),
+        WORKSPACE,
+    );
+    let messages: Vec<&str> = hits.iter().map(|f| f.message.as_str()).collect();
+    assert_eq!(hits.len(), 2, "{:?}", messages);
+    assert!(hits.iter().all(|f| f.severity == "warn"));
+    assert!(
+        messages[0]
+            .starts_with("get:/widgets: the Query.widget_co_listWidgets connector selects 1 path")
+            && messages[0].contains("(WidgetList) does not have: `widgets[]>name`")
+            && messages[1].starts_with(
+                "get:/widgets/{id}: the Query.widget_co_getWidget connector selects 1 path"
+            )
+            && messages[1].contains("(Widget) does not have: `name`"),
+        "{:?}",
+        messages
+    );
+}
+
+/// Quiet when every path is documented, when the body is open, and when the
+/// shapes were inferred from samples (intake: discovered).
+#[test]
+fn documented_open_or_inferred_paths_are_quiet() {
+    let id_only = json!({"type": "object", "properties": {"id": {"type": "string"}}});
+    for (shape, workspace) in [
+        (widget_shape(), WORKSPACE.to_string()),
+        (
+            json!({"type": "object", "additionalProperties": true}),
+            WORKSPACE.to_string(),
+        ),
+        (
+            id_only,
+            WORKSPACE.replace("intake: spec", "intake: discovered"),
+        ),
+    ] {
+        let hits = connector_path_findings(shape.clone(), &workspace);
+        assert!(hits.is_empty(), "{}: {:?}", shape, hits);
+    }
+}
+
+/// A recruiting API's custom-fields read: the 200 body is a `oneOf` whose error
+/// branch carries `success` and whose success branch does not, so the
+/// unresolved union is reported. When both branches carry it, or the
+/// inventory resolved the success branch and it carries it, it is quiet.
+#[test]
+fn a_success_or_error_union_is_judged_branch_by_branch() {
+    let union = |success_branch: Value| {
+        json!({"oneOf": [
+            success_branch,
+            {"type": "object", "properties": {"success": {"type": "boolean"}, "errorInfo": {"type": "object"}}}
+        ]})
+    };
+    let fields_only = json!({"type": "object", "properties": {"fields": {"type": "array", "items": {"type": "string"}}}});
+    let hits = success_findings(
+        "",
+        "      isSuccess: \"$.success\"",
+        &success_inventory(union(fields_only.clone())),
+    );
+    assert_eq!(hits.len(), 1, "{:?}", hits);
+    assert!(
+        hits[0].message.contains("(it carries: fields)"),
+        "{}",
+        hits[0].message
+    );
+
+    let flagged = json!({"type": "object", "properties": {"success": {"type": "boolean"}, "fields": {"type": "array", "items": {"type": "string"}}}});
+    assert!(success_findings(
+        "",
+        "      isSuccess: \"$.success\"",
+        &success_inventory(union(flagged.clone()))
+    )
+    .is_empty());
+
+    let mut resolved = success_inventory(union(fields_only));
+    resolved["shapes"]["Resolved"] = flagged;
+    resolved["operations"][1]["response"]["referenced_shape"] = json!("#/shapes/Resolved");
+    assert!(success_findings("", "      isSuccess: \"$.success\"", &resolved).is_empty());
 }

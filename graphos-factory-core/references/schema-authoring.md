@@ -696,6 +696,17 @@ documented error shape for the operations the block covers, or it warns.
 It is silent when no shape is documented at all, and a free-form body
 (opaque JSON, no properties) counts as resolving.
 
+**An `isSuccess` path must be in every body it decides.** An `@source`'s
+`isSuccess` decides every operation on that source that has none of its
+own. A path a success body does not carry reads null, so the expression is
+false and every success of that operation becomes a connector error. Guard
+it (`$.success ?? true`), or give that operation its own `isSuccess`.
+`lint`'s `success-path-unresolved` checks each path, unless a `??` follows
+it, against each decided operation's documented success body. For a
+`oneOf` of a success and an error branch it uses the branch the inventory
+resolved as success, and with none resolved it warns when one branch
+carries the path and another does not.
+
 ## Descriptions
 
 Every root field and every type gets a doc comment. Prefer the vendor's own
@@ -1075,6 +1086,14 @@ error `argument-required-optional-in-source`: the caller could no
 longer leave it out, so the source's omission behaviour would be unreachable.
 Make it optional, or, when it must be required, record why with the
 decision form of the `behaviour` waiver above (`--omit 'get:/x|behaviour|query:x|editorial'`).
+
+**The mirror holds too: a required source is a required argument.** An
+optional argument over a source parameter, or a top-level body key, that
+the source requires is the lint warning `argument-optional-required-in-source`.
+A caller who leaves it out gets a call without it, and the vendor rejects
+that call. Make it `!`, give it a default, or fill it in the connector
+(`$args.x ?? …`). When the source's `required` does not hold, record why with
+the same `behaviour` decision.
 
 **A bare `$` selection** returns the whole response, and the
 classifier reads it that way: `selection: "$"` on a `[String]` field over

@@ -4233,6 +4233,565 @@ fn lint_error_paths(
     }
 }
 
+/// Whether an `isSuccess` path is missing from a success body, and if so the
+/// properties the body (or the branch that lacks it) does carry. A plain
+/// body lacks it when the path resolves to nothing. A `oneOf`/`anyOf` body
+/// lacks it when no branch carries it, or when one branch carries it and
+/// another does not: the branch without it reads null, and that branch may
+/// be the success payload.
+fn success_lacks(body: &Value, shapes: &Object, steps: &[ErrorPathStep]) -> Option<Vec<String>> {
+    let mut carried = Vec::new();
+    if resolve_error_path(body, shapes, steps) == PathResolves::No {
+        body_properties(body, shapes, 0, &mut carried);
+        return Some(carried);
+    }
+    let root = deref_shape(body, shapes)?;
+    let branches = get_arr(root, "oneOf").or_else(|| get_arr(root, "anyOf"))?;
+    let verdicts: Vec<(PathResolves, &Value)> = branches
+        .iter()
+        .map(|b| (resolve_error_path(b, shapes, steps), b))
+        .collect();
+    let carries = verdicts.iter().any(|(v, _)| *v == PathResolves::Yes);
+    let lacking = verdicts.iter().find(|(v, _)| *v == PathResolves::No)?;
+    if !carries && verdicts.iter().any(|(v, _)| *v == PathResolves::CannotTell) {
+        return None;
+    }
+    body_properties(lacking.1, shapes, 0, &mut carried);
+    Some(carried)
+}
+
+/// The string literal (`"…"` or `"""…"""`) after the `isSuccess:` key in a
+/// directive's argument text or a root field's text, and its byte offset.
+/// The key is found in the blanked text, so one inside a string or a comment
+/// is not read.
+fn is_success_value(text: &str) -> Option<(String, usize)> {
+    let code = crate::graphql::blank(text);
+    let m = Regex::new(r"\bisSuccess\s*:").unwrap().find(&code)?;
+    let bytes = text.as_bytes();
+    let mut at = m.end();
+    while at < bytes.len() && bytes[at].is_ascii_whitespace() {
+        at += 1;
+    }
+    if bytes[at..].starts_with(b"\"\"\"") {
+        let start = at + 3;
+        let len = text[start..].find("\"\"\"")?;
+        return Some((text[start..start + len].to_string(), start));
+    }
+    if bytes.get(at) != Some(&b'"') {
+        return None;
+    }
+    let start = at + 1;
+    let mut j = start;
+    while j < bytes.len() && bytes[j] != b'"' && bytes[j] != b'\n' {
+        j += if bytes[j] == b'\\' { 2 } else { 1 };
+    }
+    Some((text[start..j.min(bytes.len())].to_string(), start))
+}
+
+/// One warning rule, `success-path-unresolved`: every `$.`-rooted path an
+/// `isSuccess` expression reads must resolve in the documented success body
+/// of each operation it decides. The `@source` expression decides every
+/// included operation on that source without an `isSuccess` of its own; a
+/// `@connect`'s decides that one operation. A path absent from the body
+/// reads null, so the expression is false and every success of that
+/// operation becomes a connector error: a recruiting API's source-wide `$.success` did
+/// this to an operation whose body has no `success` key, and only an e2e
+/// snapshot full of nulls showed it. A path followed by `??` has a fallback
+/// and is not reported, nor is an operation with no documented success
+/// body, nor a body that cannot say which properties it carries. A 200 body
+/// that is a `oneOf`/`anyOf` of a success and an error branch is judged on
+/// the success branch the inventory resolved (`referenced_shape`); with
+/// none resolved, it is reported when some branches carry the path and
+/// another lacks it, since a branch without it always reads as a failure.
+/// Its custom-fields read was that: the error branch carries
+/// `success`, the success branch does not.
+fn lint_success_paths(
+    sdl: &str,
+    schema_file: &str,
+    workspace: &Value,
+    selection: Option<&Value>,
+    inventory: Option<&Value>,
+    findings: &mut Findings,
+) {
+    let (selection, inventory) = match (selection, inventory) {
+        (Some(s), Some(i)) => (s, i),
+        _ => return,
+    };
+    let shapes = match get(inventory, "shapes").and_then(Value::as_object) {
+        Some(s) => s,
+        None => return,
+    };
+    let field_prefix = get_str(workspace, "field_prefix").unwrap_or("");
+    let operations: HashMap<&str, &Value> = get_arr(inventory, "operations")
+        .into_iter()
+        .flatten()
+        .filter_map(|o| get_str(o, "key").map(|k| (k, o)))
+        .collect();
+    let source_re = Regex::new(r#"\bsource\s*:\s*"([^"]*)""#).unwrap();
+    let success_body = |op: &Value| -> Option<Value> {
+        let response = get(op, "response")?;
+        if let Some(branch) = get(response, "referenced_shape") {
+            return Some(match branch.as_str() {
+                Some(r) => crate::json::object(vec![("$ref", Value::from(r))]),
+                None => branch.clone(),
+            });
+        }
+        let r = get_str(response, "shape_ref")?;
+        Some(crate::json::object(vec![("$ref", Value::from(r))]))
+    };
+    // The paths of one expression that have no `??` fallback after them.
+    let unguarded = |content: &str| -> Vec<ErrorPath> {
+        error_mapping_paths(content)
+            .into_iter()
+            .filter(|p| {
+                !content[p.offset + p.text.len()..]
+                    .trim_start()
+                    .starts_with("??")
+            })
+            .collect()
+    };
+
+    // (source name) -> (operation key, success body) for the operations the
+    // source's expression decides.
+    let mut by_source: HashMap<String, Vec<(String, Value)>> = HashMap::new();
+    for (key, entry) in get_obj(selection, "operations").into_iter().flatten() {
+        if !truthy(get(entry, "include")) {
+            continue;
+        }
+        let name = match get(entry, "graphql").and_then(|g| get_str(g, "name")) {
+            Some(n) => n,
+            None => continue,
+        };
+        let root = get(entry, "graphql")
+            .and_then(|g| get_str(g, "root"))
+            .unwrap_or("query");
+        let root_type = if root == "query" { "Query" } else { "Mutation" };
+        let field = format!("{}_{}", field_prefix, name);
+        let Some(field_text) = root_field_text(sdl, root_type, &field) else {
+            continue;
+        };
+        let Some(op) = operations.get(key.as_str()) else {
+            continue;
+        };
+        let own = is_success_value(&field_text);
+        let Some(body) = success_body(op) else {
+            continue;
+        };
+        match own {
+            // Rule: success-path-unresolved (a @connect's own isSuccess)
+            Some((content, at)) => {
+                for path in unguarded(&content) {
+                    let Some(carried) = success_lacks(&body, shapes, &path.steps) else {
+                        continue;
+                    };
+                    let first_line = field_line(sdl, root_type, &field).unwrap_or(1);
+                    let line = first_line
+                        + field_text.as_bytes()[..(at + path.offset).min(field_text.len())]
+                            .iter()
+                            .filter(|c| **c == b'\n')
+                            .count();
+                    findings.warn(
+                        "success-path-unresolved",
+                        format!(
+                            "{}: `{}` in the `{}.{}` @connect isSuccess is not in the documented success body (it carries: {}); it reads null there, so every success of this operation is reported as a connector error — read a property the body has, or give it a fallback (`{} ?? true`) (schema-authoring.md § Errors)",
+                            key,
+                            path.text,
+                            root_type,
+                            field,
+                            if carried.is_empty() { "no named properties".to_string() } else { carried.join(", ") },
+                            path.text,
+                        ),
+                        Some(schema_file),
+                        Some(line),
+                    );
+                }
+            }
+            None => {
+                if let Some(source) = source_re.captures(&field_text).map(|m| m[1].to_string()) {
+                    by_source
+                        .entry(source)
+                        .or_default()
+                        .push((key.clone(), body));
+                }
+            }
+        }
+    }
+
+    // Rule: success-path-unresolved (the @source isSuccess)
+    let name_re = Regex::new(r#"\bname\s*:\s*"([^"]*)""#).unwrap();
+    for d in directives(sdl, "source") {
+        let Some(args_start) = sdl[d.index..].find('(').map(|p| d.index + p + 1) else {
+            continue;
+        };
+        let Some(name) = name_re.captures(&d.args).map(|m| m[1].to_string()) else {
+            continue;
+        };
+        let Some((content, at)) = is_success_value(&d.args) else {
+            continue;
+        };
+        let Some(decided) = by_source.get(&name) else {
+            continue;
+        };
+        for path in unguarded(&content) {
+            let missing: Vec<&str> = decided
+                .iter()
+                .filter(|(_, body)| success_lacks(body, shapes, &path.steps).is_some())
+                .map(|(k, _)| k.as_str())
+                .collect();
+            if missing.is_empty() {
+                continue;
+            }
+            const SHOWN: usize = 5;
+            let mut named = missing
+                .iter()
+                .take(SHOWN)
+                .copied()
+                .collect::<Vec<_>>()
+                .join(", ");
+            if missing.len() > SHOWN {
+                named.push_str(&format!(" and {} more", missing.len() - SHOWN));
+            }
+            findings.warn(
+                "success-path-unresolved",
+                format!(
+                    "`{}` in the @source(name: \"{}\") isSuccess is not in the documented success body of {} of the {} {} it decides ({}); it reads null there, so every success of those operations is reported as a connector error — give it a fallback (`{} ?? true`), or set isSuccess on those operations' @connect (schema-authoring.md § Errors)",
+                    path.text,
+                    name,
+                    missing.len(),
+                    decided.len(),
+                    if decided.len() == 1 { "operation" } else { "operations" },
+                    named,
+                    path.text,
+                ),
+                Some(schema_file),
+                Some(line_of(sdl, args_start + at + path.offset)),
+            );
+        }
+    }
+}
+
+/// One warning rule, `wire-key-undocumented`: a query key a selected
+/// operation's connector sends — a `queryParams` key, or a `name=` pair in
+/// the URL template's query string — that the inventory does not document
+/// as one of that operation's query parameters. A stub `scaffold` drafts
+/// takes its query matchers from the connector, so it demands the same key
+/// and every offline layer passes: incidentio's schedule entries sent
+/// `after`/`before` where the spec has `entry_window_start`/`_end`. A key
+/// the vendor accepts without documenting it is a spec correction: patch
+/// the pinned document so the inventory records it. Keys built from an
+/// expression, and an operation the inventory does not have, are left alone.
+fn lint_wire_keys(
+    sdl: &str,
+    schema_file: &str,
+    workspace: &Value,
+    selection: Option<&Value>,
+    inventory: Option<&Value>,
+    findings: &mut Findings,
+) {
+    let (selection, inventory) = match (selection, inventory) {
+        (Some(s), Some(i)) => (s, i),
+        _ => return,
+    };
+    let field_prefix = get_str(workspace, "field_prefix").unwrap_or("");
+    let operations: HashMap<&str, &Value> = get_arr(inventory, "operations")
+        .into_iter()
+        .flatten()
+        .filter_map(|o| get_str(o, "key").map(|k| (k, o)))
+        .collect();
+    let path_re = Regex::new(r#"\b(?:GET|POST|PUT|PATCH|DELETE|HEAD)\s*:\s*"([^"]+)""#).unwrap();
+    for (key, entry) in get_obj(selection, "operations").into_iter().flatten() {
+        if !truthy(get(entry, "include")) {
+            continue;
+        }
+        let Some(name) = get(entry, "graphql").and_then(|g| get_str(g, "name")) else {
+            continue;
+        };
+        let root = get(entry, "graphql")
+            .and_then(|g| get_str(g, "root"))
+            .unwrap_or("query");
+        let root_type = if root == "query" { "Query" } else { "Mutation" };
+        let field = format!("{}_{}", field_prefix, name);
+        let Some(field_text) = root_field_text(sdl, root_type, &field) else {
+            continue;
+        };
+        let Some(op) = operations.get(key.as_str()) else {
+            continue;
+        };
+        // The documented query parameters, and any pair the operation's own
+        // path carries (`/?operation=user` keys an RPC-style endpoint).
+        let mut documented: Vec<&str> = get_arr(op, "parameters")
+            .into_iter()
+            .flatten()
+            .filter(|p| get_str(p, "in") == Some("query"))
+            .filter_map(|p| get_str(p, "name"))
+            .collect();
+        if let Some((_, q)) = get_str(op, "path").and_then(|p| p.split_once('?')) {
+            documented.extend(q.split('&').filter_map(|pair| pair.split('=').next()));
+        }
+        let mut sent: Vec<String> = connector_block(&field_text, "queryParams")
+            .map(|q| block_entries(&q))
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|e| e.key)
+            .collect();
+        if let Some(query) = path_re
+            .captures(&field_text)
+            .and_then(|m| m[1].split_once('?').map(|(_, q)| q.to_string()))
+        {
+            sent.extend(
+                query
+                    .split('&')
+                    .map(|pair| pair.split('=').next().unwrap_or("").to_string()),
+            );
+        }
+        let mut undocumented: Vec<String> = Vec::new();
+        for k in sent {
+            let k = k.trim().trim_matches('\'').to_string();
+            let dynamic = k.is_empty() || k.contains('{') || k.contains('$');
+            // The documented name as written (`statuses[]` for `statuses[]`),
+            // or with a list suffix the source leaves off (`ids[]` for `ids`).
+            // A suffix the source requires and the connector drops is a
+            // different key on the wire, and is reported.
+            // A member of a documented object parameter, spelled
+            // `filter_by.state` or `filter[state]` (deepObject), is that
+            // parameter on the wire.
+            let object_member = k
+                .find(['.', '['])
+                .filter(|at| !k[*at..].starts_with("[]"))
+                .is_some_and(|at| documented.contains(&&k[..at]));
+            let matches = documented.contains(&k.as_str())
+                || k.strip_suffix("[]")
+                    .is_some_and(|base| documented.contains(&base))
+                || object_member;
+            if dynamic || matches || undocumented.contains(&k) {
+                continue;
+            }
+            undocumented.push(k);
+        }
+        if undocumented.is_empty() {
+            continue;
+        }
+        documented.sort_unstable();
+        documented.dedup();
+        findings.warn(
+            "wire-key-undocumented",
+            format!(
+                "{}: {}.{} sends query {} {} that the source does not document for this operation (documented: {}); a stub scaffolded from the connector demands the same {}, so no offline layer can tell — send the documented name, or, when the vendor accepts it undocumented, correct the pinned document and `codify --source` so the inventory records it (spec-intake.md § Pinned specs and patches)",
+                key,
+                root_type,
+                field,
+                if undocumented.len() == 1 { "key" } else { "keys" },
+                undocumented
+                    .iter()
+                    .map(|k| format!("`{}`", k))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                if documented.is_empty() { "none".to_string() } else { documented.join(", ") },
+                if undocumented.len() == 1 { "key" } else { "keys" },
+            ),
+            Some(schema_file),
+            field_line(sdl, root_type, &field),
+        );
+    }
+}
+
+/// One warning rule, `connector-path-undocumented`: a selected operation's
+/// connector selects a path its documented success body does not have —
+/// the same fact `reconcile` reports as fields drift, here where `evidence`
+/// records it. A stub `scaffold` drafts carries every path the selection
+/// names, so the e2e case maps it and passes; the vendor sends no such
+/// field and the agent reads null. A field the vendor does send without
+/// documenting it is a spec correction (patch the pinned document). Silent
+/// where the shapes were inferred from samples, and for an open shape
+/// (`additionalProperties`, `oneOf`), which `reconcile` cannot walk either.
+fn lint_connector_paths(
+    sdl: &str,
+    schema_file: &str,
+    workspace: &Value,
+    selection: Option<&Value>,
+    inventory: Option<&Value>,
+    findings: &mut Findings,
+) {
+    let (selection, inventory) = match (selection, inventory) {
+        (Some(s), Some(i)) => (s, i),
+        _ => return,
+    };
+    if get_str(workspace, "intake") == Some("discovered") {
+        return;
+    }
+    let Some(shapes) = get(inventory, "shapes").and_then(Value::as_object) else {
+        return;
+    };
+    let field_prefix = get_str(workspace, "field_prefix").unwrap_or("");
+    let operations: HashMap<&str, &Value> = get_arr(inventory, "operations")
+        .into_iter()
+        .flatten()
+        .filter_map(|o| get_str(o, "key").map(|k| (k, o)))
+        .collect();
+    let spans: HashMap<&str, Vec<crate::reconcile::FieldSpan>> = ["Query", "Mutation"]
+        .iter()
+        .map(|r| (*r, crate::reconcile::field_spans(sdl, r)))
+        .collect();
+    for (key, entry) in get_obj(selection, "operations").into_iter().flatten() {
+        if !truthy(get(entry, "include")) {
+            continue;
+        }
+        let Some(name) = get(entry, "graphql").and_then(|g| get_str(g, "name")) else {
+            continue;
+        };
+        let root = get(entry, "graphql")
+            .and_then(|g| get_str(g, "root"))
+            .unwrap_or("query");
+        let root_type = if root == "query" { "Query" } else { "Mutation" };
+        let field = format!("{}_{}", field_prefix, name);
+        let Some(op) = operations.get(key.as_str()) else {
+            continue;
+        };
+        let Some(shape_ref) = get(op, "response").and_then(|r| get_str(r, "shape_ref")) else {
+            continue;
+        };
+        let Some(span) = spans
+            .get(root_type)
+            .and_then(|s| s.iter().find(|f| f.name == field))
+        else {
+            continue;
+        };
+        let Some(sel_text) = span.connect.as_ref().and_then(|c| c.selection.clone()) else {
+            continue;
+        };
+        let shape = crate::json::object(vec![("$ref", Value::from(shape_ref))]);
+        let resolved = crate::reconcile::resolve_paths(
+            &crate::reconcile::parse_selection(&sel_text),
+            &shape,
+            shapes,
+        );
+        if resolved.unknown.is_empty() {
+            continue;
+        }
+        const SHOWN: usize = 8;
+        let mut named = resolved
+            .unknown
+            .iter()
+            .take(SHOWN)
+            .map(|p| format!("`{}`", p))
+            .collect::<Vec<_>>()
+            .join(", ");
+        if resolved.unknown.len() > SHOWN {
+            named.push_str(&format!(" and {} more", resolved.unknown.len() - SHOWN));
+        }
+        findings.warn(
+            "connector-path-undocumented",
+            format!(
+                "{}: the {}.{} connector selects {} {} that the documented success body ({}) does not have: {}; a scaffolded stub carries every path the selection names, so the e2e case passes while the vendor sends nothing there — select the documented name, or, when the vendor does send it, correct the pinned document and `codify --source` (spec-intake.md § Pinned specs and patches)",
+                key,
+                root_type,
+                field,
+                resolved.unknown.len(),
+                if resolved.unknown.len() == 1 { "path" } else { "paths" },
+                shape_ref.trim_start_matches("#/shapes/"),
+                named,
+            ),
+            Some(schema_file),
+            Some(span.line),
+        );
+    }
+}
+
+/// One warning rule, `auth-scheme-drift`: each credential header the schema
+/// sends (a header whose value carries `{{AUTH_EXPR}}`) against the
+/// inventory's documented schemes (`api.auth[]`). It fires when the header
+/// is one no scheme documents while the source documents a header-borne
+/// credential, or when every scheme documented for that header gives a
+/// literal prefix (`Bearer `, `Basic `) and the schema's prefix is none of
+/// them. Every offline layer renders the same header into the request and
+/// the stub demands it back, so a wrong scheme passes everything until the
+/// vendor answers 401. Silent when the source documents no credential in a
+/// header, and for a scheme whose prefix it does not record.
+fn lint_auth_scheme(
+    sdl: &str,
+    schema_file: &str,
+    inventory: Option<&Value>,
+    findings: &mut Findings,
+) {
+    let Some(inventory) = inventory else {
+        return;
+    };
+    let schemes: Vec<&Value> = get(inventory, "api")
+        .and_then(|a| get_arr(a, "auth"))
+        .into_iter()
+        .flatten()
+        .collect();
+    let header_of = |s: &Value| get_str(s, "header").map(str::to_lowercase);
+    let documented_headers: Vec<String> = {
+        let mut h: Vec<String> = schemes.iter().filter_map(|s| header_of(s)).collect();
+        h.sort();
+        h.dedup();
+        h
+    };
+    if documented_headers.is_empty() {
+        return;
+    }
+    let mut seen: HashSet<(String, String)> = HashSet::new();
+    for (header, value) in credential_header_values(sdl) {
+        let prefix = value.split("{{").next().unwrap_or("").to_string();
+        if !seen.insert((header.clone(), prefix.clone())) {
+            continue;
+        }
+        let line = sdl
+            .find(&format!("value: \"{}", value))
+            .map(|at| line_of(sdl, at));
+        let for_header: Vec<&&Value> = schemes
+            .iter()
+            .filter(|s| header_of(s).as_deref() == Some(header.as_str()))
+            .collect();
+        if for_header.is_empty() {
+            findings.warn(
+                "auth-scheme-drift",
+                format!(
+                    "the schema sends its credential in the `{}` header, which no scheme in the inventory's api.auth documents (documented credential headers: {}); every offline layer sends and demands the same header, so only the vendor can refuse it — send it where the source says (spec-intake.md § What the reader records about authentication)",
+                    header,
+                    documented_headers.join(", ")
+                ),
+                Some(schema_file),
+                line,
+            );
+            continue;
+        }
+        let prefixes: Vec<String> = for_header
+            .iter()
+            .filter_map(|s| get_str(s, "prefix"))
+            .map(|p| p.trim().to_string())
+            .collect();
+        if prefixes.len() < for_header.len() || prefixes.iter().any(|p| p.is_empty()) {
+            continue;
+        }
+        if prefixes
+            .iter()
+            .any(|p| p.eq_ignore_ascii_case(prefix.trim()))
+        {
+            continue;
+        }
+        let mut listed = prefixes.clone();
+        listed.sort();
+        listed.dedup();
+        findings.warn(
+            "auth-scheme-drift",
+            format!(
+                "the `{}` header is sent as `{}{{{{AUTH_EXPR}}}}`, but every scheme the inventory documents for it gives another prefix ({}); every offline layer sends and demands the same header, so only the vendor can refuse it — write the documented prefix outside the placeholder (spec-intake.md § What the reader records about authentication)",
+                header,
+                prefix,
+                listed
+                    .iter()
+                    .map(|p| format!("`{} `", p))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            Some(schema_file),
+            line,
+        );
+    }
+}
+
 // ── Casing and the wire vocabulary ───────────────────────────────────────────
 
 /// Follow `$ref` chains through the inventory's shapes.
@@ -6265,6 +6824,29 @@ fn lint_descriptions(
                     line,
                 );
             }
+            // The mirror: the source requires a value the schema lets the
+            // caller leave out, so a call without it reaches the vendor
+            // without it and fails there. Quiet when something else fills
+            // the value (a GraphQL default, a `$args.x ??` fallback in the
+            // connector), and for a key nested in a body object, whose
+            // `required` holds only when its parent is sent.
+            if !fact.required_in_schema
+                && fact.required_in_source == Some(true)
+                && !(fact.key.starts_with("body:") && fact.key.contains('.'))
+                && !argument_has_default(&field_text, &fact.arg)
+                && !connector_falls_back(&field_text, &fact.arg)
+                && !waived.contains(&(key.clone(), fact.key.clone()))
+            {
+                findings.warn(
+                    "argument-optional-required-in-source",
+                    format!(
+                        "{}: argument `{}` of {}.{} is optional but the source's {} is required; a call that leaves it out is sent without it and fails at the vendor — make it required (`!`), give it a default, or record why the source's `required` does not hold with `decisions add --question … --choice … --resolved … --omit '{}|behaviour|{}|editorial'` (schema-authoring.md § Argument constraints)",
+                        key, fact.arg, root_type, field, fact.origin, key, fact.key
+                    ),
+                    Some(schema_file),
+                    line,
+                );
+            }
             // A waived omission sentence is not owed (ADR 0095); the
             // constraint clause still is.
             let owed = fact
@@ -6303,6 +6885,26 @@ fn lint_descriptions(
             );
         }
     }
+}
+
+/// The argument's declaration in the field text carries a default value
+/// (`limit: Int = 25`): the router fills it when the caller leaves it out.
+fn argument_has_default(field_text: &str, arg: &str) -> bool {
+    let code = crate::graphql::blank(field_text);
+    Regex::new(&format!(
+        r"(?:^|[(,\s]){}\s*:\s*[^,)=@]*=",
+        regex::escape(arg)
+    ))
+    .map(|re| re.is_match(&code))
+    .unwrap_or(false)
+}
+
+/// The connector supplies a value of its own when the argument is absent
+/// (`$args.limit ?? 25`).
+fn connector_falls_back(field_text: &str, arg: &str) -> bool {
+    Regex::new(&format!(r"\$args\.{}\s*\?\?", regex::escape(arg)))
+        .map(|re| re.is_match(field_text))
+        .unwrap_or(false)
 }
 
 /// What one root-field argument's source says, judged against the argument's
@@ -8853,6 +9455,31 @@ pub fn lint_workspace(dir: &Path, options: &LintOptions) -> LintResult {
     );
     if inventory.is_some() {
         lint_error_paths(
+            &sdl,
+            &schema_file,
+            &workspace,
+            selection.as_ref(),
+            inventory.as_ref(),
+            &mut findings,
+        );
+        lint_success_paths(
+            &sdl,
+            &schema_file,
+            &workspace,
+            selection.as_ref(),
+            inventory.as_ref(),
+            &mut findings,
+        );
+        lint_wire_keys(
+            &sdl,
+            &schema_file,
+            &workspace,
+            selection.as_ref(),
+            inventory.as_ref(),
+            &mut findings,
+        );
+        lint_auth_scheme(&sdl, &schema_file, inventory.as_ref(), &mut findings);
+        lint_connector_paths(
             &sdl,
             &schema_file,
             &workspace,
