@@ -1254,6 +1254,9 @@ pub fn main(argv: &[String]) -> i32 {
         0 if target_failed => 1,
         code => code,
     };
+    for line in spec_only_lines(&evidence, &dir) {
+        println!("{}", line);
+    }
     // Last, so the report ends on it; its absence is the only positive
     // signal the report gives.
     for line in not_validated_lines(&evidence) {
@@ -1298,6 +1301,89 @@ pub fn operations_line(evidence: &Value) -> String {
         unchecked("e2e"),
         unchecked("conformance"),
     )
+}
+
+/// The first line `scaffold` writes into every case it drafts, and the
+/// metadata key it writes into every stub. Removing the header does not
+/// change the stub, so the two are counted apart.
+const SCAFFOLD_CASE_HEADER: &str = "# scaffold:";
+const SCAFFOLD_STUB_KEY: &str = "x-scaffold";
+/// The metadata key `fixtures` writes into a stub built from a recording.
+const RECORDED_STUB_KEY: &str = "x-recorded-from";
+
+/// The report's lines on what the executed layers were measured against.
+/// A unit or e2e pass against a stub built from the source document shows
+/// the connector agrees with that document, not that the vendor answers the
+/// same way: an error inside a 2xx body, another content type or a narrower
+/// credential passes every such case. So the report counts, whatever the
+/// layers said, the selected operations with no live pass and the e2e stubs
+/// recorded from the real API; then the cases and stubs that are still
+/// scaffold drafts. The stub count is per workspace: a recording is not yet
+/// attributed to the operation it answers.
+pub fn spec_only_lines(evidence: &Value, dir: &Path) -> Vec<String> {
+    let mut out = Vec::new();
+    let ops: Vec<&Value> = get_obj(evidence, "operations")
+        .into_iter()
+        .flatten()
+        .map(|(_, v)| v)
+        .collect();
+    let no_live = ops
+        .iter()
+        .filter(|o| get_str(o, "live") != Some("pass"))
+        .count();
+    let files = |sub: &str, ext: &str| -> Vec<PathBuf> {
+        let mut paths: Vec<PathBuf> = std::fs::read_dir(dir.join(sub))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().and_then(|e| e.to_str()) == Some(ext))
+            .collect();
+        paths.sort();
+        paths
+    };
+    let cases = files("tests/cases", "graphql");
+    let drafted_cases = cases
+        .iter()
+        .filter(|p| {
+            std::fs::read_to_string(p)
+                .map(|t| t.lines().any(|l| l.starts_with(SCAFFOLD_CASE_HEADER)))
+                .unwrap_or(false)
+        })
+        .count();
+    let stubs: Vec<Value> = files("tests/fixtures/mappings", "json")
+        .iter()
+        .filter_map(|p| std::fs::read_to_string(p).ok())
+        .filter_map(|t| crate::json::parse(&t).ok())
+        .collect();
+    let stub_has = |key: &str| {
+        stubs
+            .iter()
+            .filter(|s| get(s, "metadata").and_then(|m| get(m, key)).is_some())
+            .count()
+    };
+    if no_live > 0 {
+        out.push(format!(
+            "spec only: {} of {} selected operation(s) have no live pass, and {} of {} e2e stub(s) were recorded from the real API (`fixtures`); a unit or e2e pass against a stub built from the source document shows the connector agrees with that document, not that the vendor answers the same way",
+            no_live,
+            ops.len(),
+            stub_has(RECORDED_STUB_KEY),
+            stubs.len(),
+        ));
+    }
+    let drafted_stubs = stub_has(SCAFFOLD_STUB_KEY);
+    if drafted_cases > 0 || drafted_stubs > 0 {
+        out.push(format!(
+            "drafts: {} of {} e2e case(s) still carry the `{}` header and {} of {} stub(s) still carry `metadata.{}`; a case whose header is gone may still answer from a drafted stub",
+            drafted_cases,
+            cases.len(),
+            SCAFFOLD_CASE_HEADER,
+            drafted_stubs,
+            stubs.len(),
+            SCAFFOLD_STUB_KEY,
+        ));
+    }
+    out
 }
 
 /// The layers that execute anything, keyed as `layers` records them, each

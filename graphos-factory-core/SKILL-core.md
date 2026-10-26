@@ -339,13 +339,13 @@ connector test results. Then report, in this order:
 3. every override: its assertions `ok`, its drift from the selection (the
    engineer's, reported not fixed), and whether you changed it and why;
 4. the validation table from `evidence/latest.json`, naming every skipped
-   or not-run layer and its reason;
+   or not-run layer and its reason, and `evidence`'s `spec only:` and `drafts:`
+   lines: a pass against stubs built from the source document is not a pass against the vendor;
 5. the `graphos-factory-core lock` result, including the recorded skill revision,
    dirty state and commit hash.
 
-The provenance record describes the authored state. The model value is
-self-reported. It does not prove the model identity or the full session
-history. It does not claim bit-for-bit replay.
+The provenance record describes the authored state. The model value is self-reported.
+It does not prove the model identity or the full session history, nor bit-for-bit replay.
 
 Quote the passing tool output rather than describing it. If any selected
 operation lacks executed evidence, the workspace is **not** validated — say

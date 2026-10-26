@@ -70,6 +70,29 @@ those left `unchecked` at e2e or at conformance, and the report ends with a
 or one saying no executed layer ran, with the first layer's reason. The
 absence of that line is the only all-clear the report gives.
 
+## What the offline layers are measured against
+
+Unit and e2e run the connector against stubs. A stub `scaffold` drafts takes
+its request matcher from the connector's own mapping and its response from
+the source document's shape. So a pass shows the connector agrees with that
+document. It does not show the vendor answers the same way. An error inside a
+2xx body, another content type, a narrower credential or a list the vendor
+fans out per item all pass every such case.
+
+Only a stub recorded from the real API (`probe`, then `fixtures`, which marks
+it `metadata.x-recorded-from`) or a live pass measures the vendor. `evidence`
+prints two lines on this whatever the layers said:
+
+- `spec only:` counts the selected operations with no live pass, and the e2e
+  stubs recorded from the real API.
+- `drafts:` counts the cases that still carry the `# scaffold:` header and the
+  stubs that still carry `metadata.x-scaffold`, counted apart. Removing a
+  case's header changes nothing in its stub, and the unit suite holds a
+  separate copy of the response.
+
+Report both lines with the validation table. Never describe a workspace whose
+operations are all `spec only` as tested against the API.
+
 ## Running a subset
 
 `unit.sh` and `e2e.sh` take `--only PATTERN` to run one case instead of the
