@@ -24,6 +24,10 @@
         "null_handling": {
           "enum": ["send_null", "omit"],
           "description": "What the connector sends when a caller passes a nullable body argument as an explicit null: send_null (the key as JSON null) or omit (the key dropped). A judgement for the whole workspace; a resolved decisions.json null_handling entry overrides it for one argument."
+        },
+        "oauth_scope_lists": {
+          "enum": ["all_of", "any_of"],
+          "description": "How an operation's OAuth scope list in the source reads: all_of (OpenAPI's meaning, every scope required; the default) or any_of (the vendor lists alternatives as one list, any one suffices). A judgement for the whole workspace, read when the granted scopes are checked against the selected operations."
         }
       }
     },

@@ -393,6 +393,7 @@ defaults:
   max_depth: 6
   opaque_json_policy: forbid  # forbid | allow_with_reason — an undocumented JSON field fails lint under forbid
   null_handling: omit         # omit | send_null — what an explicit null argument sends; optional, a decisions.json entry overrides it per argument
+  oauth_scope_lists: all_of   # all_of | any_of — how the source's OAuth scope list per operation reads; optional, all_of (OpenAPI's meaning) by default
 operations:
   get:/v2/incidents:
     include: true
