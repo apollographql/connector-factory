@@ -174,6 +174,7 @@ pub fn usage(command: &str, argv: &[String]) -> Option<String> {
     let own: Option<String> = match (command, verb(command, argv)) {
         ("init", _) => Some(cmd::init::USAGE.to_string()),
         ("inventory", Some("links")) => Some(cmd::inventory_links::USAGE.to_string()),
+        ("inventory", Some("supplement")) => Some(cmd::inventory_supplement::USAGE.to_string()),
         ("inventory", _) => Some(cmd::inventory::usage()),
         ("context", _) => Some(cmd::context::USAGE.to_string()),
         ("decisions", _) => Some(cmd::decisions::USAGE.to_string()),

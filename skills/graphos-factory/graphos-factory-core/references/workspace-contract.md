@@ -219,7 +219,7 @@ connect_spec: v0.4             # rest: the default for a new workspace; v0.3 rem
 federation_version: "2.15.2"    # composition plugin pin; render/compose match this exactly against supergraph.yaml
 # federation_spec_version: "2.12"  # set only when the schema links an older federation spec than the plugin minor (e.g. an older workspace moved to plugin 2.15.2 but still linking v2.12); a new workspace links federation/v2.15 and omits it
 sparse_fieldsets: { param: fields }  # optional: the string query parameter a GET names its fields in; absent means `fields`; `enabled: false` turns the rule off for a source whose parameter means something else (schema-authoring.md § Sparse fieldsets)
-intake: spec | discovered | mixed   # rest: how inventory.json was built — from a description document (`inventory build`; the format is the sources.lock entry's kind), from docs and probes, or both
+intake: spec | discovered | mixed   # rest: how inventory.json was built — from a description document (`inventory build`; the format is the sources.lock entry's kind), from docs and probes (a supplement only), or both (a document and a supplement)
 created_at: 2026-09-08T00:00:00Z
 ```
 
@@ -233,7 +233,13 @@ and people edit. `kind` names the dialect — `openapi` for OpenAPI 3.x,
 `swagger` for Swagger 2.0 (`postman`, `har` planned) — and
 `graphos-factory-core sources pin` writes kind, version, upstream and the hashes
 so they are never hand-typed. `docs` and `probe` entries record pages read
-and live requests made.
+and live requests made. A `supplement` entry names an OpenAPI 3 document the
+agent wrote of what the documentation or the probes say and no pinned
+document does (`provenance: docs` or `probe`). It has no upstream copy and
+no patches: it is edited directly, and every operation in it cites its page
+or sample (`x-source`). `inventory build .` builds from every document entry
+the lock follows, then every supplement, in lock order (spec-intake.md §
+When the document is incomplete).
 
 ```yaml
 contract_version: 1
@@ -253,6 +259,10 @@ sources:
         reason: "live API returns null; spec says non-nullable string"
         context: "every open incident probed so far has a null summary"   # optional, from codify --context
         verified: { how: recorded sample, sample: .factory/samples/incidentsShow/1.json }
+  - kind: supplement
+    path: supplement.openapi.json # the agent's own document; never under .factory/
+    provenance: docs
+    note: the escalation endpoints the vendor's document lacks, read from its reference pages
   - kind: docs
     url: https://api-docs.incident.io/tag/Incidents-V2
     retrieved_at: 2026-09-08T14:05:40Z
@@ -366,7 +376,19 @@ entry; the rules are in [schema-authoring.md](schema-authoring.md)
 file that changed since the lock and prints what it would have changed
 (`--force` overwrites and loses the edit). A wrong *document* is corrected in
 the pinned working copy and codified with `codify --source`; a judgement you
-disagree with is written into `selection.yaml`, where it belonged all along.
+disagree with is written into `selection.yaml`, where it belonged all along;
+an operation no document declares goes in a supplement.
+
+**Every operation comes back from its inputs.** The lock only notices an
+edit made after it. `lint`'s `inventory-not-rebuildable` (a warning) rebuilds
+from the lock's inputs and compares operations, not shapes (`infer
+--update-inventory` fills those after the build). It names:
+- the operations no input declares;
+- the ones the inputs declare that the inventory lacks;
+- the ones whose record differs, counted by field.
+
+A lock that names no document or supplement at all means every operation
+was written by hand.
 
 Every operation the skill ever saw is accounted for as one of
 `supported`, `unsupported` (with reason), or listed under `unresolved`.

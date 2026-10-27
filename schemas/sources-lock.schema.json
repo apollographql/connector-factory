@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/apollographql/graphos-factory/schemas/sources-lock.schema.json",
   "title": "Sources lock (.factory/sources.lock.yaml)",
-  "description": "Where every input to the workspace came from, and — for a pinned description document — the vendor's pristine copy, the working copy the agent and the engineer may edit, and the patch set that turns one into the other. Kinds: `openapi` (OpenAPI 3.x) and `swagger` (Swagger 2.0) are pinned documents; `docs` and `probe` record pages read and live requests made. `postman` and `har` are planned.",
+  "description": "Where every input to the workspace came from, and — for a pinned description document — the vendor's pristine copy, the working copy the agent and the engineer may edit, and the patch set that turns one into the other. Kinds: `openapi` (OpenAPI 3.x) and `swagger` (Swagger 2.0) are pinned documents; `docs` and `probe` record pages read and live requests made. `supplement` is an OpenAPI 3 document the agent wrote of what the documentation or probes say and no pinned document does; the inventory is built from it beside the pinned documents. `postman` and `har` are planned.",
   "type": "object",
   "required": ["contract_version", "sources"],
   "additionalProperties": false,
@@ -14,7 +14,8 @@
         "oneOf": [
           { "$ref": "#/$defs/document" },
           { "$ref": "#/$defs/docs" },
-          { "$ref": "#/$defs/probe" }
+          { "$ref": "#/$defs/probe" },
+          { "$ref": "#/$defs/supplement" }
         ]
       }
     }
@@ -66,6 +67,17 @@
         "retrieved_at": { "type": "string" },
         "sha256": { "$ref": "#/$defs/sha256", "description": "SHA-256 of the page as retrieved, when the agent recorded one." },
         "used_for": { "type": "array", "items": { "type": "string" } },
+        "note": { "type": "string" }
+      }
+    },
+    "supplement": {
+      "type": "object",
+      "required": ["kind", "path", "provenance"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "const": "supplement" },
+        "path": { "type": "string", "description": "The document, relative to the workspace root and never under `.factory/`: OpenAPI 3, every operation citing where it was read (`x-source`, a URL or a workspace path). Edited directly; it has no upstream copy and no patches." },
+        "provenance": { "enum": ["docs", "probe"], "description": "What its operations were read from: the vendor's documentation (confidence 0.9) or live requests (1)." },
         "note": { "type": "string" }
       }
     },

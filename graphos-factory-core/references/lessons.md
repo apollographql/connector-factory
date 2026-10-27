@@ -696,3 +696,26 @@ records in `decisions.json` are never moved or extended. After a merge, run
 `lint`: `decision-overlap` names two decisions added independently about the
 same span, and `decisions link . --id <newer> --after|--amends <older>`
 records which holds.
+
+## Operations read from the docs were merged into the inventory by a script
+
+**Seen on:** a messaging API whose published spec was six years old, built 2026-09-30, found 2026-10-26.
+
+The spec had 170 of the API's 270 methods. The agent read the other 100
+from pinned reference pages and merged them into `inventory.json` with a
+script of its own. While there, the script also replaced 60 thin response
+shapes of spec operations with shapes typed from the docs, and changed 95
+request bodies from form to JSON. The script wrote `.factory/` directly, so
+it was removed. From then on nothing could rebuild the inventory. The first
+spec correction (a scope list) could not be applied, because a rebuild would
+have dropped 100 operations the schema used. A rebuild would also have
+dropped the 60 typed shapes, on which 12 envelopes, 9 connector selections
+and 96 recorded omissions depended.
+
+**Rule:** what the docs say and the document does not goes in a
+supplement (spec-intake.md § When the document is incomplete). A
+correction to an operation the document declares, a typed shape included,
+is a patch to the pinned document (`codify --source`). Nothing goes into
+`inventory.json` but `inventory build .`. `lint`'s
+`inventory-not-rebuildable` names an inventory its inputs do not
+reproduce, and `inventory supplement` moves the hand-merged operations out.

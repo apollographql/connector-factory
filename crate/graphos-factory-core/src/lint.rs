@@ -8778,6 +8778,154 @@ fn lint_live(
 /// Pinned description documents: the sources lock validates, every document
 /// has an untouched upstream copy, the working copy is acknowledged in the
 /// applied lock, and the recorded patches reproduce it.
+/// The inventory against what its inputs build (ADR 0138). It is a reading
+/// of the sources, never edited, so every operation in it should come back
+/// from `inventory build`: one no input declares was written by hand, one
+/// the inputs declare that it lacks means it is stale, and one that differs
+/// carries an edit no input records. Shapes are not compared, because
+/// `infer --update-inventory` fills them from samples after the build. A
+/// workspace with no sources lock at all is `lint_sources`'s to report.
+fn lint_inventory_rebuild(dir: &Path, inventory: &Value, findings: &mut Findings) {
+    const RULE: &str = "inventory-not-rebuildable";
+    let file = Some(".factory/inventory.json");
+    let ops: Vec<&Value> = get_arr(inventory, "operations")
+        .into_iter()
+        .flatten()
+        .collect();
+    if ops.is_empty() || !matches!(crate::sources::read_sources_lock(dir), Ok(Some(_))) {
+        return;
+    }
+    let fix = "rebuild it (graphos-factory-core inventory build); move operations no input declares into a supplement (graphos-factory-core inventory supplement), a correction to a pinned document into a patch (codify --source), and a judgement into selection.yaml";
+    let inputs = match crate::inputs::workspace_inputs(dir) {
+        Ok(i) => i,
+        Err(e) => {
+            findings.warn(
+                RULE,
+                format!("the inventory's inputs cannot be read: {}", e),
+                file,
+                None,
+            );
+            return;
+        }
+    };
+    if inputs.is_empty() {
+        findings.warn(
+            RULE,
+            format!(
+                "{} operation(s), and {} names no document or supplement that builds them: the inventory was written by hand and nothing can rebuild it — {}",
+                ops.len(),
+                crate::sources::SOURCES_LOCK,
+                fix
+            ),
+            file,
+            None,
+        );
+        return;
+    }
+    let built = match crate::inputs::build_workspace(dir, None) {
+        Ok((b, _)) => b.inventory,
+        Err(e) => {
+            findings.warn(
+                RULE,
+                format!("the inventory's inputs do not build: {}", e),
+                file,
+                None,
+            );
+            return;
+        }
+    };
+    let index = |v: Vec<&Value>| -> std::collections::BTreeMap<String, Value> {
+        v.into_iter()
+            .filter_map(|o| Some((get_str(o, "key")?.to_string(), o.clone())))
+            .collect()
+    };
+    let current = index(ops);
+    let rebuilt = index(
+        get_arr(&built, "operations")
+            .into_iter()
+            .flatten()
+            .collect(),
+    );
+    let unsourced: Vec<&String> = current
+        .keys()
+        .filter(|k| !rebuilt.contains_key(*k))
+        .collect();
+    let missing: Vec<&String> = rebuilt
+        .keys()
+        .filter(|k| !current.contains_key(*k))
+        .collect();
+    let mut fields: std::collections::BTreeMap<String, usize> = Default::default();
+    let mut differing: Vec<&String> = Vec::new();
+    for (k, op) in &current {
+        let Some(other) = rebuilt.get(k) else {
+            continue;
+        };
+        if crate::json::deep_equal(op, other) {
+            continue;
+        }
+        differing.push(k);
+        let names: std::collections::BTreeSet<&String> = op
+            .as_object()
+            .into_iter()
+            .flat_map(|o| o.keys())
+            .chain(other.as_object().into_iter().flat_map(|o| o.keys()))
+            .collect();
+        for f in names {
+            if !crate::json::deep_equal(
+                op.get(f.as_str()).unwrap_or(&Value::Null),
+                other.get(f.as_str()).unwrap_or(&Value::Null),
+            ) {
+                *fields.entry(f.clone()).or_default() += 1;
+            }
+        }
+    }
+    if unsourced.is_empty() && missing.is_empty() && differing.is_empty() {
+        return;
+    }
+    let first = |v: &[&String]| {
+        let shown: Vec<&str> = v.iter().take(5).map(|s| s.as_str()).collect();
+        format!(
+            "{}{}",
+            shown.join(", "),
+            if v.len() > 5 { ", …" } else { "" }
+        )
+    };
+    let mut parts: Vec<String> = Vec::new();
+    if !unsourced.is_empty() {
+        parts.push(format!(
+            "{} operation(s) no input declares ({})",
+            unsourced.len(),
+            first(&unsourced)
+        ));
+    }
+    if !missing.is_empty() {
+        parts.push(format!(
+            "{} the inputs declare that it lacks ({})",
+            missing.len(),
+            first(&missing)
+        ));
+    }
+    if !differing.is_empty() {
+        let by: Vec<String> = fields.iter().map(|(f, n)| format!("{} {}", f, n)).collect();
+        parts.push(format!(
+            "{} that differ from what the inputs build ({}; by field: {})",
+            differing.len(),
+            first(&differing),
+            by.join(", ")
+        ));
+    }
+    findings.warn(
+        RULE,
+        format!(
+            "inventory.json is not what its inputs build: {} — {}",
+            parts.join("; "),
+            fix
+        ),
+        file,
+        None,
+    );
+}
+
 fn lint_sources(dir: &Path, findings: &mut Findings, schemas_dir: Option<&Path>) {
     // Acknowledged but no longer pinned — including when the whole sources
     // lock is gone — is reported before anything else can return early. An
@@ -9262,6 +9410,7 @@ pub fn lint_workspace(dir: &Path, options: &LintOptions) -> LintResult {
             &mut findings,
             options.schemas_dir,
         );
+        lint_inventory_rebuild(dir, inv, &mut findings);
     }
     let selection = load_yaml_file(dir, ".factory/selection.yaml", &mut findings);
     if let Some(sel) = &selection {

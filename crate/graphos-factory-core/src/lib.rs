@@ -19,6 +19,7 @@ pub mod findings;
 pub mod graphql;
 pub mod help;
 pub mod infer;
+pub mod inputs;
 pub mod inventory;
 pub mod json;
 pub mod json_accounting;

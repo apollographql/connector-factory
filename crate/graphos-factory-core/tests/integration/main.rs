@@ -40,6 +40,7 @@ mod inference;
 mod init;
 mod inventory;
 mod inventory_links;
+mod inventory_supplement;
 mod jsonschema;
 mod links;
 mod lint;

@@ -965,7 +965,7 @@ fn codify_source(args: &Args, dir: &Path, rel: &str) -> i32 {
             "next",
             Value::from(format!(
                 "graphos-factory-core inventory build {} && graphos-factory-core reconcile {}",
-                if args.dir() == "." { rel.to_string() } else { format!("{}/{}", args.dir(), rel) },
+                crate::inputs::rebuild_target(Path::new(&args.dir()), &args.dir(), &rel),
                 args.dir()
             )),
         ),
@@ -1096,11 +1096,7 @@ fn codify_source(args: &Args, dir: &Path, rel: &str) -> i32 {
         }
         println!(
             "  then rebuild the inventory: graphos-factory-core inventory build {} && graphos-factory-core reconcile {} (until it is rebuilt, inventory.json describes the document as it was before this edit)",
-            if args.dir() == "." {
-                rel.to_string()
-            } else {
-                format!("{}/{}", args.dir(), rel)
-            },
+            crate::inputs::rebuild_target(Path::new(&args.dir()), &args.dir(), &rel),
             args.dir()
         );
         if reason_used {

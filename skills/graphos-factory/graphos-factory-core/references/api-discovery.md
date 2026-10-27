@@ -138,13 +138,22 @@ The playbook above is mechanised by four scripts; the order matters.
    to `sources.lock.yaml`. **Probe the failures too**: a 404, an over-draw,
    an out-of-range parameter — the error shapes are part of the API, and
    they are where vendors' docs are wrongest.
-2. **Write `inventory.json` by hand** from the docs and the probes: every
-   operation with `provenance` (`docs` for the page, `probe` for a route only
-   the source or a probe revealed), `confidence`, its parameters, and a
-   `semantics` you decided — nothing derives it here. Point each
-   `response.shape_ref` / `errors[].shape_ref` at a shape *name*; the shapes
-   themselves come next.
-3. **`graphos-factory-core infer --update-inventory`** fills those shapes from the samples,
+2. **Write a supplement, never `inventory.json`** (spec-intake.md § When
+   the document is incomplete: a supplement). It is an OpenAPI 3 document
+   of what the docs and the probes say: `servers`, the auth as
+   `components.securitySchemes`, every operation with its parameters,
+   bodies and responses, and `x-source` naming the page or sample it was
+   read from. One supplement per provenance: `docs` for the pages, `probe`
+   for a route only a probe revealed. Each has a `kind: supplement` entry in
+   `sources.lock.yaml`, and `intake: discovered`. `x-semantics` records a
+   GET the page says changes state. Point each response at a component
+   schema by name; where only the samples can type it, give the component an
+   empty schema (`{}`) for the next step to fill. Then run
+   `graphos-factory-core inventory build .`. An inventory written by hand,
+   or merged by a script, is one nothing can rebuild, and lint reports it
+   (`inventory-not-rebuildable`). `inventory supplement` moves one into a
+   supplement.
+3. **`graphos-factory-core infer --update-inventory`** (after every `inventory build .`) fills those shapes from the samples,
    unioned across every operation that references the same name. Inference
    is conservative on its own: a field missing from some samples is
    optional, a field seen as string and null is nullable, and more samples

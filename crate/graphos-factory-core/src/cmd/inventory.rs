@@ -1,6 +1,8 @@
 //! inventory — build, page through, and diff a connector's API inventory.
 //!
-//!   inventory build <document> [--out .factory/inventory.json] [--force]   (OpenAPI 3.x or Swagger 2.0)
+//!   inventory build [<document>... | <workspace>] [--out .factory/inventory.json] [--force]   (OpenAPI 3.x or
+//!     Swagger 2.0; a workspace directory, or nothing for `.`: every input its sources lock names, supplements
+//!     included, ADR 0138)
 //!   inventory list [--inventory F] [--tag T] [--support S] [--grep RE] [--offset N] [--limit N] [--json]
 //!     one page (default 50); `--json` names `limit` and `next_offset`, null on the last page (ADR 0091)
 //!   inventory describe <key>... [--inventory F] [--no-shape] [--json]
@@ -123,14 +125,29 @@ pub fn tally(operations: &[Value]) -> (usize, usize, usize) {
 }
 
 fn cmd_build(args: &Args) -> i32 {
-    let spec_file = match args.positional.first() {
-        Some(f) => f,
-        None => return fail("usage: inventory build <document> [--out FILE]"),
+    // No document named: the workspace's own inputs, every pinned document
+    // and supplement its sources lock names, so a rebuild never drops what
+    // one of them declares (ADR 0138).
+    let workspace = match args.positional.as_slice() {
+        [] => Some(PathBuf::from(".")),
+        [one] if Path::new(one).is_dir() => Some(PathBuf::from(one)),
+        _ => None,
     };
-    let (built, format) = match build_from_file(Path::new(spec_file)) {
+    let result = if let Some(dir) = &workspace {
+        crate::inputs::build_workspace(dir, None)
+    } else {
+        let files: Vec<PathBuf> = args.positional.iter().map(PathBuf::from).collect();
+        crate::inputs::build_files(&files)
+    };
+    let (built, formats) = match result {
         Ok(b) => b,
         Err(e) => return fail(&e),
     };
+    let format = formats
+        .iter()
+        .map(|f| f.to_string())
+        .collect::<Vec<_>>()
+        .join(" + ");
     let schemas_dir = args.get("schemas").map(PathBuf::from);
     let errors = schema_errors(&built.inventory, schemas_dir.as_deref());
     if !errors.is_empty() {
@@ -142,7 +159,13 @@ fn cmd_build(args: &Args) -> i32 {
             errors.len()
         ));
     }
-    let out = args.get("out").unwrap_or(DEFAULT_INVENTORY);
+    let default_out = match &workspace {
+        Some(dir) if dir != Path::new(".") => {
+            dir.join(DEFAULT_INVENTORY).to_string_lossy().to_string()
+        }
+        _ => DEFAULT_INVENTORY.to_string(),
+    };
+    let out = args.get("out").unwrap_or(&default_out);
     if out != "-" {
         // Never revert a hand edit in silence. When the file being replaced
         // is a workspace inventory the lock has acknowledged, and it no
@@ -525,7 +548,7 @@ fn cmd_validate(args: &Args) -> i32 {
 /// The usage text: `inventory --help` prints it on stdout (ADR 0086).
 pub fn usage() -> String {
     format!(
-        "usage: inventory <command> [options]\n\n  build <document> [--out FILE] [--force]\n                                     build an inventory from a description document (OpenAPI 3.x or Swagger 2.0)\n  list [--tag T] [--support S] [--grep RE] [--offset N] [--limit N] [--json]\n                                     one page, 50 operations by default; --json carries total, offset, limit and\n                                     next_offset (null on the last page) -- follow next_offset to see them all\n  describe <key>... [--no-shape]     one operation with its fully expanded shape\n  links [workspace] [--json]         every candidate_entity_link fact, flat: shape > path -> by-id operation\n  diff <before.json> <after.json>    what a spec refresh changed\n  validate                           check an inventory against the contract schema\n\n  --inventory FILE                   default {}\n\n",
+        "usage: inventory <command> [options]\n\n  build [<document>... | <workspace>] [--out FILE] [--force]\n                                     build an inventory from description documents (OpenAPI 3.x or Swagger 2.0);\n                                     given a workspace (or nothing, for .), from every pinned document and\n                                     supplement its sources.lock.yaml names\n  list [--tag T] [--support S] [--grep RE] [--offset N] [--limit N] [--json]\n                                     one page, 50 operations by default; --json carries total, offset, limit and\n                                     next_offset (null on the last page) -- follow next_offset to see them all\n  describe <key>... [--no-shape]     one operation with its fully expanded shape\n  links [workspace] [--json]         every candidate_entity_link fact, flat: shape > path -> by-id operation\n  supplement [workspace] --provenance docs|probe [--out FILE] [--cite TEMPLATE] [--note TEXT] [--dry-run] [--force] [--json]\n                                     move the operations no pinned document declares into a supplement (an OpenAPI 3\n                                     document the inventory is built from) and show what a rebuild would change\n  diff <before.json> <after.json>    what a spec refresh changed\n  validate                           check an inventory against the contract schema\n\n  --inventory FILE                   default {}\n\n",
         DEFAULT_INVENTORY
     )
 }
@@ -567,6 +590,7 @@ pub fn main(argv: &[String]) -> i32 {
         "list" => cmd_list(&Args::parse(&rest, &LIST_FLAGS)),
         "describe" => cmd_describe(&Args::parse(&rest, &DESCRIBE_FLAGS)),
         "links" => super::inventory_links::main(&rest),
+        "supplement" => super::inventory_supplement::main(&rest),
         "diff" => cmd_diff(&Args::parse(&rest, &DIFF_FLAGS)),
         "validate" => cmd_validate(&Args::parse(&rest, &VALIDATE_FLAGS)),
         other => fail(&format!("unknown command \"{}\" (try --help)", other)),
@@ -580,11 +604,8 @@ pub fn main(argv: &[String]) -> i32 {
 pub fn build_from_file(
     spec_file: &Path,
 ) -> Result<(crate::openapi::Built, crate::spec::Format), String> {
-    let text = std::fs::read_to_string(spec_file)
-        .map_err(|e| format!("{}: {}", spec_file.display(), e))?;
-    let (mut built, format) = build_from_text(&text, &spec_file.to_string_lossy())?;
-    annotate_patches(&mut built.inventory, spec_file, &built.shape_names);
-    Ok((built, format))
+    let (built, mut formats) = crate::inputs::build_files(&[spec_file.to_path_buf()])?;
+    Ok((built, formats.remove(0)))
 }
 
 /// The inventory a document's text describes, before any patch marks: what
@@ -617,48 +638,20 @@ fn sanitised(name: &str) -> String {
         .collect()
 }
 
-/// When the spec is a pinned working copy inside a workspace whose
-/// sources.lock.yaml records patches, mark every operation a patch touches:
-/// its own path item (or method), or a schema its request, response or
-/// error responses reach — directly or through the `$ref`s nested in it.
-/// `shape_names` maps component references to inventory shape names, so a
-/// component called `Widget List` (shape `Widget_List`) is still found; for
-/// a Swagger document (`kind: swagger`) a `/definitions/X` pointer is looked
-/// up under the `#/components/schemas/X` the reader rewrote it to.
-/// Untouched inventories are unchanged byte for byte.
-fn annotate_patches(
+/// Mark every operation a pinned document's patches touch: its own path
+/// item (or method), or a schema its request, response or error responses
+/// reach — directly or through the `$ref`s nested in it. `shape_names` maps
+/// component references to inventory shape names, so a component called
+/// `Widget List` (shape `Widget_List`) is still found; for a Swagger
+/// document (`kind: swagger`) a `/definitions/X` pointer is looked up under
+/// the `#/components/schemas/X` the reader rewrote it to. With no patches
+/// the inventory is unchanged byte for byte.
+pub fn annotate_with(
     inventory: &mut Value,
-    spec_file: &Path,
+    kind: &str,
+    patches: &[Value],
     shape_names: &std::collections::HashMap<String, String>,
 ) {
-    let abs = std::fs::canonicalize(spec_file).unwrap_or_else(|_| spec_file.to_path_buf());
-    let mut root = abs.parent().map(Path::to_path_buf);
-    let mut lock: Option<(PathBuf, Value)> = None;
-    while let Some(dir) = root {
-        let candidate = dir.join(crate::sources::SOURCES_LOCK);
-        if candidate.exists() {
-            if let Ok(Some(l)) = crate::sources::read_sources_lock(&dir) {
-                lock = Some((dir, l));
-            }
-            break;
-        }
-        root = dir.parent().map(Path::to_path_buf);
-    }
-    let (dir, lock) = match lock {
-        Some(x) => x,
-        None => return,
-    };
-    let rel = match abs.strip_prefix(&dir) {
-        Ok(r) => r.to_string_lossy().replace('\\', "/"),
-        Err(_) => return,
-    };
-    // An entry the other surfaces refuse to follow marks nothing either.
-    let entries = crate::sources::document_entries(&lock);
-    let (kind, patches): (String, Vec<Value>) = entries
-        .iter()
-        .find(|e| e.path == rel && crate::sources::not_followed(e, &entries).is_none())
-        .map(|e| (e.kind.clone(), e.patches.clone()))
-        .unwrap_or_default();
     if patches.is_empty() {
         return;
     }
@@ -697,7 +690,7 @@ fn annotate_patches(
                 &all_shapes,
             );
             let mut hits: Vec<Value> = Vec::new();
-            for p in &patches {
+            for p in patches {
                 let pointer = get_str(p, "path").unwrap_or("");
                 let touches_item = crate::patch::under(pointer, &own)
                     || (crate::patch::under(pointer, &item)
@@ -748,7 +741,12 @@ fn annotate_patches(
                 }
             }
             if !hits.is_empty() {
-                crate::json::set(op, "patches", Value::Array(hits));
+                // A second pinned document's marks follow the first's.
+                if let Some(Value::Array(earlier)) = op.get_mut("patches") {
+                    earlier.extend(hits);
+                } else {
+                    crate::json::set(op, "patches", Value::Array(hits));
+                }
             }
         }
     }

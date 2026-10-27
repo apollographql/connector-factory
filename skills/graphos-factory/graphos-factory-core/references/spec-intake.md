@@ -213,9 +213,9 @@ codify computes the structural difference between upstream and working copy
 with the reason (and `context`, from `--context TEXT`), records no
 decision, and refreshes
 the lock, and prints the next step: rebuild the inventory (`graphos-factory-core
-inventory build openapi.json`; an `intake: mixed` workspace re-runs `infer
---update-inventory` after it) and re-run `reconcile`: nothing records which document the
-inventory was built from, so until you do, `inventory.json` and the schema
+inventory build openapi.json`, or `inventory build .` when the workspace has a
+supplement, so it is built too; an `intake: mixed` workspace re-runs `infer
+--update-inventory` after it) and re-run `reconcile`: until you do, `inventory.json` and the schema
 still describe the vendor's version and every gate stays green. An
 operation already recorded keeps its own reason, context and decision; when
 nothing changed, nothing is written and codify says so (the `--reason` is not
@@ -253,6 +253,85 @@ upstream is `source-upstream-modified`: restore it, never codify it. Because
 the patches are enumerated over the untouched upstream, re-bundling the
 vendor spec means re-applying them and reporting the ones that no longer
 fit — which is why they are recorded rather than merely marked.
+
+## When the document is incomplete: a supplement
+
+A vendor's document can lag its API by years, and some vendors publish
+none. What the documentation (or a probe) says that the document does not
+goes in a **supplement**: an OpenAPI 3 document you write, kept in the
+workspace beside the pinned one and never under `.factory/`. It is never
+merged into `inventory.json` by hand or by a script: the inventory would
+then hold operations nothing can rebuild, and the next `codify --source` or
+`sources refresh` would drop them without a word.
+
+```yaml
+# .factory/sources.lock.yaml
+  - kind: supplement
+    path: supplement.openapi.json
+    provenance: docs        # or probe: a route only a live request revealed
+    note: the methods the vendor's document lacks, read from its reference pages
+```
+
+- **Every operation names where it was read**: `x-source`, a URL or the
+  workspace path of the pinned page or sample. `inventory build` refuses an
+  operation without one: an uncited operation is a guess nobody can check.
+- **`inventory build .`** reads every pinned document and every supplement,
+  in lock order, as one document. The first input gives `info`, `servers`
+  and the top-level `security`. A supplement may `$ref` the pinned
+  document's components (`#/components/schemas/X`, which is also where a
+  Swagger document's `#/definitions/X` lands). The build refuses the same
+  operation in two inputs, a component of one name defined two ways, and a
+  path-level key (`parameters`, `servers`) one input would impose on the
+  other's operations. A supplement adds operations. A correction to one the
+  pinned document declares is a patch to that document (`codify --source`).
+- Each operation keeps its input's provenance: `spec` at confidence 1,
+  `docs` at 0.9, `probe` at 1. Set `intake: mixed` in `workspace.yaml`
+  (`discovered` when the supplement is the only input).
+- A supplement has no upstream copy, patches or refresh. Edit it directly
+  and commit the edit; its history is git's. `sources refresh` rebuilds from
+  every input, and refuses once the vendor's new document declares an
+  operation the supplement also declares. Delete the supplement's copy,
+  then refresh again.
+- What the reader derives stays derived. Write the facts the page states
+  (method, path, parameters, bodies, responses, security) and leave
+  `support`, envelopes and pagination to the builder.
+- Two facts OpenAPI has no field for go on the operation:
+  - `x-semantics: write` when the page says a GET changes state, or
+    `read` when a POST only reads. The user still confirms a POST read as
+    `root: query` in `selection.yaml`.
+  - `x-confidence` below the provenance's maximum, when the page is vague.
+
+  A pinned document's `x-semantics` is not read.
+- **A supplement that is the only input** (the vendor publishes no
+  document) also gives `servers` and the auth, as
+  `components.securitySchemes`:
+  - `x-prefix` on a scheme carries a credential prefix its type does not
+    imply (`Apikey `);
+  - a document-level `security: []` with no scheme is an API that takes no
+    credential.
+
+**An inventory that was merged by hand.** `lint` warns
+`inventory-not-rebuildable` when `inventory.json` holds operations no input
+declares, lacks ones they declare, or differs from what they build.
+`graphos-factory-core inventory supplement . --provenance docs --cite
+'pages/{path}.md'` moves the operations of that provenance into a supplement
+(`--out`, default `supplement.openapi.json`). It writes:
+- the operations;
+- the shapes only they reach;
+- `$ref`s to the components the pinned documents already declare;
+- each `x-source` from the template (`{path}`, `{operation_id}`, `{method}`);
+- the lock entry.
+
+Then it builds from every input and prints what differs from the current
+inventory. Moved operations and other operations are reported apart, and it
+exits 0 only when nothing differs. Settle each difference before `inventory
+build` replaces the inventory:
+- **A fact the supplement should state:** edit the supplement.
+- **An edit someone made to a pinned document's operations or shapes inside
+  `inventory.json`:** make it a patch.
+- **A judgement:** `selection.yaml`.
+- **A value the builder now derives** (an array root, a detected pagination
+  style): accept it.
 
 ## Refreshing against a new spec
 

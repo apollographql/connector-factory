@@ -9,6 +9,7 @@ pub mod infer;
 pub mod init;
 pub mod inventory;
 pub mod inventory_links;
+pub mod inventory_supplement;
 pub mod links;
 pub mod lint;
 pub mod lock;
@@ -83,6 +84,7 @@ pub fn flags(command: &str, verb: Option<&str>) -> Option<&'static Flags> {
         ("inventory", Some("list")) => &inventory::LIST_FLAGS,
         ("inventory", Some("describe")) => &inventory::DESCRIBE_FLAGS,
         ("inventory", Some("links")) => &inventory_links::FLAGS,
+        ("inventory", Some("supplement")) => &inventory_supplement::FLAGS,
         ("inventory", Some("diff")) => &inventory::DIFF_FLAGS,
         ("inventory", Some("validate")) => &inventory::VALIDATE_FLAGS,
         ("lint", _) => &lint::FLAGS,

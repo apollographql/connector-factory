@@ -1065,8 +1065,12 @@ fn refresh(argv: &[String]) -> i32 {
     };
     // Whether or not the workspace has an inventory yet: a document the
     // reader cannot build one from is never made the working copy.
-    let prebuilt = match crate::spec::normalise(replay.document.clone())
-        .and_then(|l| crate::openapi::build_inventory(&l.document))
+    // The inventory is built from every input the lock names (ADR 0138):
+    // the vendor's new document stands in for the working copy, beside any
+    // other pinned document and supplement, so a refresh never drops what
+    // they declare and refuses an operation both now declare.
+    let prebuilt = match crate::inputs::build_workspace(&dir, Some((&rel, replay.document.clone())))
+        .map(|(b, _)| b)
     {
         Ok(b) => b.inventory,
         Err(e) => {
@@ -1233,12 +1237,12 @@ fn refresh(argv: &[String]) -> i32 {
             // The same inventory, now with the patch marks the files on disk
             // let the builder see; the pre-built one stands in if that
             // reading fails (it has already been proven buildable).
-            let after = match crate::cmd::inventory::build_from_file(&dir.join(&rel)) {
+            let after = match crate::inputs::build_workspace(&dir, None) {
                 Ok((b, _)) => b.inventory,
                 Err(e) => {
                     eprintln!(
                         "sources: warning: the inventory was rebuilt without patch marks ({}); run `graphos-factory-core inventory build {}` to add them",
-                        e, rel
+                        e, crate::inputs::rebuild_target(&dir, ".", &rel)
                     );
                     prebuilt.clone()
                 }
@@ -1413,7 +1417,7 @@ fn refresh(argv: &[String]) -> i32 {
         None => println!(
             "  no {} to diff — run `graphos-factory-core inventory build {}`",
             crate::cmd::inventory::DEFAULT_INVENTORY_REL,
-            rel
+            crate::inputs::rebuild_target(&dir, ".", &rel)
         ),
     }
     if dry_run {
