@@ -79,8 +79,10 @@ terms `evidence` uses. There is no override.
   `evidence could not hash its inputs (<why>): fix that, then re-run
   evidence`: fix the file first, or the next run fails the same way.
 - `compose`, `connector_unit`, `wiremock_e2e`, `conformance` or `lint` not
-  `pass`. A `not_run` `connector_unit` is allowed: it is the zero-case run
-  whose suites cite their decisions. It is then listed as not verified.
+  `pass`. A `not_run` `connector_unit` is allowed only as the zero-case run
+  (`cases: 0`) whose suites cite their decisions; it is then listed as not
+  verified. A unit layer `--skip` left out, or one that never reached rover,
+  records no `cases` and is refused.
 - `live` ran and failed. A `live` that did not run is not a refusal: it
   needs a credential the user may not have given. It is listed as not
   verified.

@@ -58,7 +58,7 @@ evidence about the field you changed; a passing negative assertion is not
 evidence unless something else could have accepted the input.
 
 **Rule:** name what each green result actually proves before quoting it. If
-a layer was skipped, say `skipped` and why — `evidence/latest.json` exists
+a layer did not run, say `not_run` or `skipped` (tool missing) and why — `evidence/latest.json` exists
 so that this is mechanical.
 
 ## A toolchain pin is part of the test

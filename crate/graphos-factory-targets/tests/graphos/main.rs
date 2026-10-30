@@ -548,12 +548,12 @@ fn evidence_records_supergraph_check_not_run_under_target_evidence_layers() {
     let errors = graphos_factory_core::jsonschema::validate(&evidence, &schema);
     assert!(errors.is_empty(), "{:?}", errors);
 
-    // Left out by a flag, it is skipped, never not_run or pass.
+    // Left out by a flag, it is not_run with that reason, never skipped
+    // (the tool is not missing) or pass.
     let (_, evidence) = evidence_skipping();
-    assert_eq!(
-        evidence["target_evidence_layers"]["supergraph_check"]["status"],
-        "skipped"
-    );
+    let row = &evidence["target_evidence_layers"]["supergraph_check"];
+    assert_eq!(row["status"], "not_run");
+    assert_eq!(row["reason"], "excluded by --only/--skip");
 }
 
 fn evidence_skipping() -> (Option<i32>, Value) {

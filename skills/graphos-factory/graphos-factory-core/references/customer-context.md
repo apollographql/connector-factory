@@ -182,7 +182,7 @@ lineage. It does **not** poll remote APIs or certify metadata completeness.
   not an assessment — step 3's question still decides specialized work.
 - **`graphos-factory-core evidence`** runs the check before the live wrapper: unresolved requirements make live `not_run` with their reason;
   invalid records fail the live layer. Offline layers still run. `--skip live`
-  still reports `skipped`.
+  reports `not_run` with the reason `excluded by --only/--skip`.
 - On a known remote metadata change, fetch the scoped snapshot again and mark
   affected requirements `stale` until reassessed; rerun dependent tests. Never
   rehash a file merely to make the check pass.

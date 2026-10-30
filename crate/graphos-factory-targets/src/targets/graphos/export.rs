@@ -110,7 +110,7 @@ fn reason<'a>(row: Option<&'a Value>) -> Option<&'a str> {
 
 /// The gate over `evidence` (`latest.json`'s shape), in the terms
 /// `evidence` reports: one reason per required layer that is not `pass`
-/// (bar a `not_run` connector_unit), `live: fail` when the live layer ran
+/// (bar a zero-case `not_run` connector_unit), `live: fail` when the live layer ran
 /// and failed, then one per operation an offline layer left `fail`,
 /// `unchecked` or `skipped`, and one per operation with no executed
 /// evidence (the core's `has_executed_evidence`, which `evidence`'s own
@@ -120,7 +120,16 @@ pub fn gate(evidence: &Value) -> Gate {
     let mut reasons = Vec::new();
     for key in REQUIRED {
         let s = status(evidence, key);
-        if s != "pass" && !(key == "connector_unit" && s == "not_run") {
+        // Only the zero-case run (`cases` is 0) is the accepted `not_run`,
+        // as the other target's gate has it. A unit layer `--skip` left out
+        // or that never reached rover records no `cases` and is held
+        // (ADR 0139).
+        let zero_case = get(evidence, "layers")
+            .and_then(|l| get(l, key))
+            .and_then(|l| get(l, "cases"))
+            .and_then(Value::as_u64)
+            == Some(0);
+        if s != "pass" && !(key == "connector_unit" && s == "not_run" && zero_case) {
             let why = reason(get(evidence, "layers").and_then(|l| get(l, key)))
                 .map(|r| format!(" ({})", r))
                 .unwrap_or_default();
@@ -1071,7 +1080,8 @@ mod tests {
     fn a_layer_not_passing_is_named_with_its_reason_and_not_run_unit_passes() {
         let mut e = passing();
         e["layers"]["wiremock_e2e"] = json!({"status": "skipped", "reason": "java missing"});
-        e["layers"]["connector_unit"] = json!({"status": "not_run", "reason": "D-0001"});
+        e["layers"]["connector_unit"] =
+            json!({"status": "not_run", "reason": "D-0001", "cases": 0});
         e["layers"].as_object_mut().unwrap().remove("lint");
         e["layers"]["live"] = json!({"status": "fail", "reason": "401"});
         assert_eq!(
@@ -1085,6 +1095,20 @@ mod tests {
         assert!(not_verified(&e, &[])
             .iter()
             .any(|(l, s, w)| l == "connector_unit" && s == "not_run" && w == "D-0001"));
+    }
+
+    #[test]
+    fn a_not_run_unit_layer_without_a_zero_case_count_is_held() {
+        // Left out by `--skip unit`, or stopped before rover: no `cases`.
+        let mut e = passing();
+        e["layers"]["connector_unit"] = json!({
+            "status": "not_run",
+            "reason": graphos_factory_core::cmd::evidence::EXCLUDED_BY_FLAG
+        });
+        assert_eq!(
+            gate(&e).reasons,
+            vec!["connector_unit: not_run (excluded by --only/--skip)"]
+        );
     }
 
     #[test]

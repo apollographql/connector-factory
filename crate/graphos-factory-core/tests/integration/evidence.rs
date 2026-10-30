@@ -873,9 +873,19 @@ fn skip_and_only_take_either_layer_name_and_refuse_an_unknown_one() {
     );
     assert_eq!(code, 0);
     for key in ["write_body_proof", "connector_unit"] {
-        assert_eq!(doc["layers"][key]["status"], "skipped", "{}", key);
+        assert_eq!(doc["layers"][key]["status"], "not_run", "{}", key);
+        assert_eq!(
+            doc["layers"][key]["reason"], "excluded by --only/--skip",
+            "{}",
+            key
+        );
     }
     assert_eq!(doc["layers"]["compose"]["status"], "pass");
+    // Each operation's unit column reads the same, not `n/a`: the layer did
+    // not run, so no operation holds unit evidence.
+    for (op, columns) in doc["operations"].as_object().unwrap() {
+        assert_eq!(columns["unit"], "not_run", "{}", op);
+    }
 
     let before = std::fs::read_to_string(ws.path().join(".factory/evidence/latest.json")).unwrap();
     for flag in ["--skip", "--only"] {
@@ -1103,7 +1113,7 @@ fn an_operation_with_no_executed_evidence_is_named_not_validated() {
 }
 
 /// A run of the live layer alone that passes: compose, unit and e2e are
-/// `skipped` by the flag, but a layer did execute, so the report does not
+/// `not_run`, left out by the flag, but a layer did execute, so the report does not
 /// say none ran; the operation live covered holds executed evidence.
 #[test]
 fn a_live_only_run_that_passes_is_not_no_executed_layer() {
@@ -1126,7 +1136,11 @@ fn a_live_only_run_that_passes_is_not_no_executed_layer() {
     )
     .unwrap();
     assert_eq!(ev["layers"]["live"]["status"], "pass", "{}", stdout);
-    assert_eq!(ev["layers"]["compose"]["status"], "skipped");
+    assert_eq!(ev["layers"]["compose"]["status"], "not_run");
+    assert_eq!(
+        ev["layers"]["compose"]["reason"],
+        "excluded by --only/--skip"
+    );
     assert!(!stdout.contains("no executed layer ran"), "{}", stdout);
     assert!(
         stdout.contains(

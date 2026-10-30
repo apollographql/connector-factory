@@ -95,7 +95,8 @@ script removes the key from anything rover echoes.
   a graph ref that is not `<graph>@<variant>`,
   the base URL carries a credential, or rover
   could not run the check (no such graph or variant, a refused key, no
-  network), with rover's message as the reason. Report it as not checked
+  network), with rover's message as the reason, or `--skip supergraph_check`
+  left it out (`excluded by --only/--skip`). Report it as not checked
   against their graph, never as a pass.
 - `skipped`: rover, jq or the script is not installed.
 

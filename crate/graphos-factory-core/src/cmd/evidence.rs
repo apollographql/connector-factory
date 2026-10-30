@@ -8,7 +8,9 @@
 //! serialization, conformance, lint and json_accounting layers are this
 //! binary's own code (serialization in-process, same-run, and non-gating).
 //! Exit codes are mapped honestly: 0 pass · 1 fail · 3 not_run · 127 skipped
-//! (tool missing). Nothing here can turn a non-zero exit into `pass`.
+//! (tool missing). A layer `--only`/`--skip` leaves out is `not_run`, with
+//! the reason [`EXCLUDED_BY_FLAG`]. Nothing here can turn a non-zero exit
+//! into `pass`.
 //! Before any layer runs, the files they read are hashed into `inputs`
 //! (`provenance::evidence_inputs`), so a reader can tell, without git,
 //! whether the evidence is for the workspace as it is now.
@@ -35,6 +37,13 @@ const LAYERS: [&str; 8] = [
     "live",
 ];
 const KEEP_RUNS: usize = 3;
+/// The reason a layer `--only`/`--skip` leaves out records. It is `not_run`,
+/// the status of a layer that did not run for want of an input, and never
+/// `skipped`, which says the tool is missing (ADR 0139). The development
+/// repository's CI gate (`assert-evidence.sh`) matches this exact text to
+/// fail a layer the run left out. Its tests build the reason from this
+/// constant, so rewording it fails them until the gate is reworded too.
+pub const EXCLUDED_BY_FLAG: &str = "excluded by --only/--skip";
 
 fn evidence_key(layer: &str) -> &'static str {
     match layer {
@@ -344,8 +353,8 @@ pub fn main(argv: &[String]) -> i32 {
             layers.insert(
                 ev_key.into(),
                 crate::json::object(vec![
-                    ("status", Value::from("skipped")),
-                    ("reason", Value::from("skipped by flag")),
+                    ("status", Value::from("not_run")),
+                    ("reason", Value::from(EXCLUDED_BY_FLAG)),
                 ]),
             );
             continue;
@@ -1036,7 +1045,7 @@ pub fn main(argv: &[String]) -> i32 {
 
     // The target's layers, in its order, each reading the core layers' rows,
     // the per-operation table and the target layers already run. The same
-    // statuses apply, and a layer the flags leave out is `skipped`.
+    // statuses apply, and a layer the flags leave out is `not_run`.
     let mut target_layers = obj();
     for layer in target.evidence_layers {
         let selected = !skip.iter().any(|s| s == layer.name)
@@ -1066,8 +1075,8 @@ pub fn main(argv: &[String]) -> i32 {
             }
         } else {
             crate::json::object(vec![
-                ("status", Value::from("skipped")),
-                ("reason", Value::from("skipped by flag")),
+                ("status", Value::from("not_run")),
+                ("reason", Value::from(EXCLUDED_BY_FLAG)),
             ])
             .as_object()
             .cloned()

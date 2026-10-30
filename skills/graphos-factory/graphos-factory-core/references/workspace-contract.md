@@ -1239,7 +1239,9 @@ with no alternative or a commit message alone.
 ## `evidence/latest.json`
 
 Per-operation statuses are `pass`, `fail`, `skipped` (tool missing),
-`not_run` (input missing: no credential, no cases), `excluded` (the layer
+`not_run` (input missing: no credential, no cases; or the layer was left
+out by `--only`/`--skip`, with the reason `excluded by --only/--skip`),
+`excluded` (the layer
 ran but deliberately did not exercise this operation; the reason is under
 the layer's `exclusions`, from `tests/live.yaml`; a relationship field,
 which has no row, is excluded by a `field:` entry instead, kept as an
